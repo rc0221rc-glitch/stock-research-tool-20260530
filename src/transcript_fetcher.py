@@ -5,7 +5,7 @@ import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, quote_plus, urlparse
+from urllib.parse import parse_qs, quote_plus, urljoin, urlparse
 
 import requests
 from bs4 import BeautifulSoup
@@ -164,6 +164,154 @@ def _stockanalysis_transcripts(ticker: str) -> list[LinkResult]:
     return results
 
 
+def _ticker_base(ticker: str) -> str:
+    ticker = (ticker or "").strip().upper()
+    return re.split(r"[.\s]", ticker, maxsplit=1)[0].replace("-", "")
+
+
+def _slug_title(value: str) -> str:
+    parsed = urlparse(value)
+    value = parsed.path.strip("/").rsplit("/", 1)[-1] if parsed.scheme or parsed.netloc else value.strip("/").rsplit("/", 1)[-1]
+    value = re.sub(r"[-_]+", " ", value)
+    return re.sub(r"\s+", " ", value).strip().title()
+
+
+def _date_from_url(url: str) -> str:
+    match = re.search(r"/(20\d{2})/(\d{1,2})/(\d{1,2})/", url)
+    if match:
+        return f"{match.group(1)}{int(match.group(2)):02d}{int(match.group(3)):02d}"
+    match = re.search(r"/reports/(20\d{2})-(\d{1,2})-(\d{1,2})-", url)
+    if match:
+        return f"{match.group(1)}{int(match.group(2)):02d}{int(match.group(3)):02d}"
+    return ""
+
+
+def _fool_quote_transcripts(ticker: str, max_results: int = 10) -> list[LinkResult]:
+    base = _ticker_base(ticker).lower()
+    if not base:
+        return []
+    results: list[LinkResult] = []
+    seen: set[str] = set()
+    for exchange in ["nasdaq", "nyse", "otc"]:
+        quote_url = f"https://www.fool.com/quote/{exchange}/{base}/"
+        try:
+            response = SESSION.get(quote_url, timeout=10, allow_redirects=True)
+            if response.status_code >= 400:
+                continue
+        except Exception:
+            continue
+        for match in re.finditer(r'(?:https?://www\.fool\.com)?/earnings/call-transcripts/[^"\\\s<]+', response.text):
+            raw_url = match.group(0)
+            url = raw_url if raw_url.startswith("http") else f"https://www.fool.com{raw_url}"
+            url = url.rstrip(".,;)")
+            if url in seen:
+                continue
+            seen.add(url)
+            nearby = response.text[max(0, match.start() - 500) : match.end() + 500]
+            headline = ""
+            headline_match = re.search(r'headline\\?":\\?"([^"\\]+)', nearby)
+            if headline_match:
+                headline = headline_match.group(1)
+            title = headline or _slug_title(url)
+            if "transcript" not in f"{title} {url}".casefold():
+                title = f"{title} Transcript"
+            results.append(
+                LinkResult(
+                    title=title,
+                    url=url,
+                    source="Motley Fool",
+                    date=_date_from_url(url),
+                    kind="transcript",
+                    is_direct_file=False,
+                )
+            )
+            if len(results) >= max_results:
+                return results
+    return results
+
+
+def _marketbeat_transcripts(ticker: str, max_results: int = 10) -> list[LinkResult]:
+    base = _ticker_base(ticker)
+    if not base:
+        return []
+    results: list[LinkResult] = []
+    seen: set[str] = set()
+    for exchange in ["NASDAQ", "NYSE", "OTCMKTS"]:
+        index_url = f"https://www.marketbeat.com/stocks/{exchange}/{base}/earnings/"
+        try:
+            response = SESSION.get(index_url, timeout=10, allow_redirects=True)
+            if response.status_code >= 400:
+                continue
+        except Exception:
+            continue
+        soup = BeautifulSoup(response.text, "lxml")
+        for link in soup.select("a[href*='/earnings/reports/']"):
+            href = link.get("href") or ""
+            if not href:
+                continue
+            url = urljoin("https://www.marketbeat.com", href).split("#", 1)[0] + "#transcript"
+            if url in seen:
+                continue
+            seen.add(url)
+            title = link.get_text(" ", strip=True)
+            if not title or title.startswith("#") or "transcript" not in title.casefold():
+                title = f"{base.upper()} {_slug_title(url)} Earnings Call Transcript"
+            results.append(
+                LinkResult(
+                    title=title,
+                    url=url,
+                    source="MarketBeat",
+                    date=_date_from_url(url),
+                    kind="transcript",
+                    is_direct_file=False,
+                )
+            )
+            if len(results) >= max_results:
+                return results
+    return results
+
+
+def _earningscall_transcripts(ticker: str, max_results: int = 12) -> list[LinkResult]:
+    base = _ticker_base(ticker).lower()
+    if not base:
+        return []
+    results: list[LinkResult] = []
+    seen: set[str] = set()
+    for exchange in ["nasdaq", "nyse", "otc"]:
+        index_url = f"https://earningscall.biz/e/{exchange}/s/{base}/"
+        try:
+            response = SESSION.get(index_url, timeout=10, allow_redirects=True)
+            if response.status_code >= 400 or "not found" in response.text[:20000].casefold():
+                continue
+        except Exception:
+            continue
+        soup = BeautifulSoup(response.text, "lxml")
+        selector = f"a[href*='/e/{exchange}/s/{base}/y/']"
+        for link in soup.select(selector):
+            href = link.get("href") or ""
+            match = re.search(r"/y/(20\d{2})/q/(q[1-4])", href.casefold())
+            if not match:
+                continue
+            url = urljoin("https://earningscall.biz", href)
+            if url in seen:
+                continue
+            seen.add(url)
+            fiscal_year, quarter = match.group(1), match.group(2).upper()
+            results.append(
+                LinkResult(
+                    title=f"{base.upper()} {quarter} {fiscal_year} Earnings Call Transcript",
+                    url=url,
+                    source="EarningsCall.biz",
+                    date=fiscal_year,
+                    kind="transcript",
+                    is_direct_file=False,
+                )
+            )
+            if len(results) >= max_results:
+                return results
+    return results
+
+
 def _domain_from_url(url: str) -> str:
     if not url:
         return ""
@@ -237,10 +385,78 @@ def _duckduckgo_search(query: str, max_results: int = 6) -> list[LinkResult]:
     return results
 
 
+def _bing_search_url(query: str) -> str:
+    return f"https://www.bing.com/search?q={quote_plus(query)}&setmkt=en-US&mkt=en-US&cc=US"
+
+
+def _known_transcript_entry_links(ticker: str, company_name: str) -> list[LinkResult]:
+    base = _ticker_base(ticker)
+    if not base:
+        return []
+    query_name = " ".join(part for part in [company_name, base] if part).strip()
+    source_queries = [
+        ("Seeking Alpha", f"site:seekingalpha.com/article {query_name} earnings call transcript"),
+        ("Motley Fool", f"site:fool.com/earnings/call-transcripts {query_name} earnings call transcript"),
+        ("MarketBeat", f"site:marketbeat.com/earnings/reports {query_name} earnings call transcript"),
+        ("EarningsCall.biz", f"site:earningscall.biz/e {query_name} transcript"),
+        ("Investing.com", f"site:investing.com {query_name} earnings call transcript"),
+        ("AlphaStreet", f"site:alphastreet.com {query_name} earnings call transcript"),
+        ("MarketScreener", f"site:marketscreener.com {query_name} earnings call transcript"),
+    ]
+    entries = [
+        LinkResult(
+            f"Seeking Alpha {base.upper()} Transcript 页面",
+            f"https://seekingalpha.com/symbol/{base.upper()}/earnings/transcripts",
+            "Transcript 平台入口",
+            kind="transcript",
+            is_direct_file=False,
+            note="可能需要登录或订阅；作为高相关平台入口保留。",
+        ),
+        LinkResult(
+            f"MarketBeat {base.upper()} Earnings Transcript 页面",
+            f"https://www.marketbeat.com/stocks/NASDAQ/{base.upper()}/earnings/",
+            "Transcript 平台入口",
+            kind="transcript",
+            is_direct_file=False,
+            note="若交易所不是 NASDAQ，可用页面内搜索或下方搜索入口。",
+        ),
+        LinkResult(
+            f"EarningsCall.biz {base.upper()} Transcript 页面",
+            f"https://earningscall.biz/e/nasdaq/s/{base.lower()}/",
+            "Transcript 平台入口",
+            kind="transcript",
+            is_direct_file=False,
+            note="若交易所不是 NASDAQ，可用 Bing 入口定位。",
+        ),
+    ]
+    for source, query in source_queries:
+        entries.append(LinkResult(f"Bing 定向搜索：{source} {base.upper()} Transcript", _bing_search_url(query), "Transcript 搜索建议", kind="transcript", is_direct_file=False))
+        entries.append(LinkResult(f"Google 定向搜索：{source} {base.upper()} Transcript", search_url(query), "Transcript 搜索建议", kind="transcript", is_direct_file=False))
+    return entries
+
+
+def _round_robin_by_source(items: list[dict[str, Any]], preferred_sources: list[str] | None = None) -> list[dict[str, Any]]:
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    order: list[str] = []
+    for item in items:
+        source = str(item.get("source") or "")
+        if source not in grouped:
+            grouped[source] = []
+            order.append(source)
+        grouped[source].append(item)
+    preferred = [source for source in (preferred_sources or []) if source in grouped]
+    order = preferred + [source for source in order if source not in preferred]
+    balanced: list[dict[str, Any]] = []
+    while any(grouped[source] for source in order):
+        for source in order:
+            if grouped[source]:
+                balanced.append(grouped[source].pop(0))
+    return balanced
+
+
 def _transcript_search_jobs(ticker: str, company_name: str, website: str) -> list[tuple[Any, tuple[Any, ...], dict[str, Any]]]:
     search_name = company_name or ticker
     jobs: list[tuple[Any, tuple[Any, ...], dict[str, Any]]] = [
-        (_stockanalysis_transcripts, (ticker,), {}),
         (_duckduckgo_search, (f"{search_name} {ticker} earnings call transcript", 6), {}),
         (_duckduckgo_search, (f"{search_name} quarterly earnings call transcript", 5), {}),
         (_duckduckgo_search, (f"site:fool.com {search_name} {ticker} earnings call transcript", 4), {}),
@@ -307,22 +523,32 @@ def find_transcripts(
     company_name = (company_name or yahoo_name or ticker).strip()
     results: list[LinkResult] = []
 
-    motley = run_limited([(_motley_candidates, (ticker, company_name, dates, yahoo_info), {})], per_job_timeout=8, total_timeout=9, max_workers=1)
-    for group in motley:
+    first_wave = [
+        (_motley_candidates, (ticker, company_name, dates, yahoo_info), {}),
+        (_fool_quote_transcripts, (ticker,), {}),
+        (_marketbeat_transcripts, (ticker,), {}),
+        (_earningscall_transcripts, (ticker,), {}),
+        (_stockanalysis_transcripts, (ticker,), {}),
+    ]
+    for group in run_limited(first_wave, per_job_timeout=8, total_timeout=18, max_workers=5):
         if isinstance(group, list):
             results.extend(group)
 
-    for group in run_limited(_transcript_search_jobs(ticker, company_name, website), per_job_timeout=6, total_timeout=16, max_workers=5):
-        if isinstance(group, list):
-            results.extend(group)
-        if len(results) >= max_results:
-            break
+    if len(dedupe_links(results)) < max_results:
+        for group in run_limited(_transcript_search_jobs(ticker, company_name, website), per_job_timeout=6, total_timeout=16, max_workers=5):
+            if isinstance(group, list):
+                results.extend(group)
 
     if len(results) < 2 and claude_api_key:
         results.extend(_claude_fallback(ticker, company_name, claude_api_key))
-    if not results:
-        results.append(LinkResult("未找到 Transcript，打开搜索建议", search_url(f"{ticker} {company_name} earnings call transcript"), "搜索建议", kind="transcript", is_direct_file=False, note="自动发现失败，可用搜索链接继续查找。"))
-    return dedupe_links(results)[:max_results]
+    deduped = dedupe_links(results)
+    if not deduped:
+        results.extend(_known_transcript_entry_links(ticker, company_name))
+    elif len(deduped) < 4:
+        results.extend(_known_transcript_entry_links(ticker, company_name))
+    deduped = dedupe_links(results)
+    preferred_sources = ["Motley Fool", "MarketBeat", "EarningsCall.biz", "Stock Analysis", "网页搜索", "Transcript 平台入口", "Transcript 搜索建议"]
+    return _round_robin_by_source(deduped, preferred_sources)[:max_results]
 
 
 def _extract_transcript_text(html_content: str) -> str | None:

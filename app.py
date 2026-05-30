@@ -152,6 +152,20 @@ def collect_filings(
         except Exception:
             pass
 
+    filing_dates = [item.get("date", "") for item in results if item.get("date")]
+    if transcript and "transcript" in kinds:
+        try:
+            results.extend(
+                transcript.find_transcripts(
+                    company.get("ticker") or company.get("local_code") or "",
+                    company.get("name_en") or company.get("name") or "",
+                    filing_dates=filing_dates,
+                    claude_api_key=claude_api_key,
+                )
+            )
+        except Exception:
+            pass
+
     if china and any(kind in kinds for kind in ["annual", "quarterly", "transcript", "presentation"]):
         try:
             results.extend(china.find_china_research_links(company, kinds=kinds, years=selected_years, quarters=quarters or [], max_results=24))
@@ -167,20 +181,6 @@ def collect_filings(
     if platforms and any(kind in kinds for kind in ["transcript", "presentation"]):
         try:
             results.extend(platforms.discover_platform_links(company, kinds=kinds, years=selected_years, quarters=quarters or [], max_results=28))
-        except Exception:
-            pass
-
-    filing_dates = [item.get("date", "") for item in results if item.get("date")]
-    if transcript and "transcript" in kinds:
-        try:
-            results.extend(
-                transcript.find_transcripts(
-                    company.get("ticker") or company.get("local_code") or "",
-                    company.get("name_en") or company.get("name") or "",
-                    filing_dates=filing_dates,
-                    claude_api_key=claude_api_key,
-                )
-            )
         except Exception:
             pass
 

@@ -61,6 +61,19 @@ LOCAL_COMPANIES: list[dict[str, Any]] = [
         "aliases": ["Tesla", "TSLA"],
     },
     {
+        "name": "英特尔",
+        "name_en": "Intel Corporation",
+        "ticker": "INTC",
+        "local_code": "INTC",
+        "market": "美股",
+        "exchange": "NASDAQ",
+        "country": "美国",
+        "flag": "🇺🇸",
+        "ir_url": "https://www.intc.com/",
+        "cik": "0000050863",
+        "aliases": ["Intel", "INTC", "Intel Corp", "英特尔"],
+    },
+    {
         "name": "腾讯控股",
         "name_en": "Tencent Holdings Limited",
         "ticker": "TCEHY",
@@ -567,6 +580,32 @@ LOCAL_COMPANIES: list[dict[str, Any]] = [
         "cik": "0000937875",
         "aliases": ["STMicroelectronics", "STM"],
     },
+    {
+        "name": "Siltronic",
+        "name_en": "Siltronic AG",
+        "ticker": "WAF.DE",
+        "local_code": "WAF",
+        "market": "欧洲",
+        "exchange": "XETRA",
+        "country": "德国",
+        "flag": "🇩🇪",
+        "ir_url": "https://www.siltronic.com/en/investors.html",
+        "cik": "",
+        "aliases": ["Siltronic", "Siltronic AG", "WAF", "WAF.DE", "SLTCY"],
+    },
+    {
+        "name": "SUMCO",
+        "name_en": "SUMCO Corporation",
+        "ticker": "3436.T",
+        "local_code": "3436",
+        "market": "日股",
+        "exchange": "TSE",
+        "country": "日本",
+        "flag": "🇯🇵",
+        "ir_url": "https://www.sumcosi.com/english/ir/",
+        "cik": "",
+        "aliases": ["SUMCO", "SUMCO Corporation", "SUMCO Corp", "3436", "3436.T"],
+    },
 ]
 
 
@@ -625,24 +664,106 @@ def _score_company(query: str, company: dict[str, Any]) -> float:
                 return 0.80 + min(ratio, 1) * 0.08
         return 0
     for field in normalized_fields:
-        if len(normalized_query) >= 2 and (normalized_query in field or (len(field) >= 4 and field in normalized_query)):
+        if len(normalized_query) >= 2 and normalized_query in field:
             ratio = len(normalized_query) / max(len(field), 1)
             return 0.84 + min(ratio, 1) * 0.1
+        if len(field) >= max(6, int(len(normalized_query) * 0.65)) and field in normalized_query:
+            ratio = len(field) / max(len(normalized_query), 1)
+            return 0.78 + min(ratio, 1) * 0.1
     if len(normalized_query) <= 3:
         return 0
     best = max((difflib.SequenceMatcher(None, normalized_query, field).ratio() for field in normalized_fields), default=0)
     return best if best >= 0.68 else 0
 
 
+def _yahoo_market_fields(quote: dict[str, Any]) -> dict[str, str]:
+    symbol = str(quote.get("symbol") or "").upper()
+    exchange = str(quote.get("exchange") or "").upper()
+    exch_disp = str(quote.get("exchDisp") or "")
+    if exchange in {"NMS", "NGM", "NCM", "NYQ", "ASE", "PCX"}:
+        return {"market": "美股", "country": "美国", "flag": "🇺🇸"}
+    if exchange in {"PNK", "OQX", "OQB"} or "OTC" in exch_disp.upper():
+        return {"market": "美股 / OTC", "country": "", "flag": "🌐"}
+    if exchange == "JPX" or symbol.endswith(".T"):
+        return {"market": "日股", "country": "日本", "flag": "🇯🇵"}
+    if exchange in {"GER", "FRA", "MUN", "DUS", "HAM"} or symbol.endswith((".DE", ".F", ".MU", ".DU", ".HM")):
+        return {"market": "欧洲", "country": "德国", "flag": "🇩🇪"}
+    if exchange in {"LSE", "LNX"} or symbol.endswith(".L"):
+        return {"market": "欧洲", "country": "英国", "flag": "🇬🇧"}
+    if exchange in {"PAR", "EPA"} or symbol.endswith(".PA"):
+        return {"market": "欧洲", "country": "法国", "flag": "🇫🇷"}
+    if exchange in {"AMS", "AEX"} or symbol.endswith(".AS"):
+        return {"market": "欧洲", "country": "荷兰", "flag": "🇳🇱"}
+    if exchange in {"SWX", "VTX"} or symbol.endswith(".SW"):
+        return {"market": "欧洲", "country": "瑞士", "flag": "🇨🇭"}
+    if exchange == "HKG" or symbol.endswith(".HK"):
+        return {"market": "港股", "country": "中国香港", "flag": "🇭🇰"}
+    if exchange in {"SHH", "SHE"} or symbol.endswith((".SS", ".SZ")):
+        return {"market": "A股", "country": "中国", "flag": "🇨🇳"}
+    if exchange == "TAI" or symbol.endswith(".TW"):
+        return {"market": "台股", "country": "中国台湾", "flag": "🇹🇼"}
+    if exchange in {"KSC", "KOE"} or symbol.endswith((".KS", ".KQ")):
+        return {"market": "韩股", "country": "韩国", "flag": "🇰🇷"}
+    return {"market": "全球证券", "country": "", "flag": "🌐"}
+
+
+def _yahoo_quote_to_company(quote: dict[str, Any]) -> dict[str, Any] | None:
+    if str(quote.get("quoteType") or "").upper() != "EQUITY":
+        return None
+    symbol = str(quote.get("symbol") or "").strip()
+    name = str(quote.get("longname") or quote.get("shortname") or "").strip()
+    if not symbol or not name:
+        return None
+    market_fields = _yahoo_market_fields(quote)
+    return {
+        "name": name,
+        "name_en": name,
+        "ticker": symbol,
+        "local_code": symbol,
+        "market": market_fields["market"],
+        "exchange": quote.get("exchDisp") or quote.get("exchange") or "",
+        "country": market_fields["country"],
+        "flag": market_fields["flag"],
+        "ir_url": "",
+        "cik": "",
+        "aliases": [symbol, quote.get("shortname", ""), quote.get("longname", ""), quote.get("exchDisp", "")],
+        "source": "Yahoo Finance 全球搜索",
+    }
+
+
+@lru_cache(maxsize=128)
+def _yahoo_company_search(query: str) -> list[dict[str, Any]]:
+    try:
+        data = request_json(
+            "https://query2.finance.yahoo.com/v1/finance/search",
+            timeout=8,
+            params={"q": query, "quotesCount": 10, "newsCount": 0, "enableFuzzyQuery": "true"},
+            headers={"User-Agent": "Mozilla/5.0"},
+        )
+    except Exception:
+        return []
+    companies: list[dict[str, Any]] = []
+    for quote in data.get("quotes", []) or []:
+        company = _yahoo_quote_to_company(quote)
+        if company:
+            companies.append(company)
+    return companies
+
+
 def _merge_results(primary: list[dict[str, Any]], secondary: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
     merged: list[dict[str, Any]] = []
     seen: set[str] = set()
     for company in [*primary, *secondary]:
-        keys = [company.get("ticker", ""), company.get("local_code", ""), company.get("cik", ""), company.get("name_en", "")]
-        key = "|".join(str(item).casefold() for item in keys if item)
-        if key in seen:
+        keys = [
+            normalize_text(company.get("ticker", "")),
+            normalize_text(company.get("local_code", "")),
+            normalize_text(company.get("cik", "")),
+            normalize_text(company.get("name_en", "")),
+        ]
+        keys = [key for key in keys if key]
+        if keys and any(key in seen for key in keys):
             continue
-        seen.add(key)
+        seen.update(keys)
         merged.append(company)
         if len(merged) >= limit:
             break
@@ -663,16 +784,27 @@ def search_companies(query: str, limit: int = 12, include_sec: bool = True) -> l
             local_scored.append(enriched)
     local_scored.sort(key=lambda item: item["match_score"], reverse=True)
 
+    yahoo_scored = []
+    for company in _yahoo_company_search(query):
+        score = _score_company(query, company)
+        if score >= 0.60:
+            enriched = dict(company)
+            enriched["match_score"] = score
+            yahoo_scored.append(enriched)
+    yahoo_scored.sort(key=lambda item: item["match_score"], reverse=True)
+
     sec_scored: list[dict[str, Any]] = []
     if include_sec:
+        non_sec_has_strong_match = any(item["match_score"] >= 0.90 for item in [*local_scored, *yahoo_scored])
+        sec_threshold = 0.90 if non_sec_has_strong_match else 0.58
         for company in _sec_company_tickers():
             score = _score_company(query, company)
-            if score >= 0.58:
+            if score >= sec_threshold:
                 enriched = dict(company)
                 enriched["match_score"] = score
                 sec_scored.append(enriched)
         sec_scored.sort(key=lambda item: item["match_score"], reverse=True)
-    return _merge_results(local_scored, sec_scored, limit)
+    return _merge_results(_merge_results(local_scored, yahoo_scored, limit), sec_scored, limit)
 
 
 def find_best_company(query: str) -> dict[str, Any] | None:
