@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import time
 from typing import Any
 
@@ -56,82 +57,125 @@ def fetch_sec_filings(
     except Exception:
         return []
 
-    recent = data.get("filings", {}).get("recent", {})
-    forms = recent.get("form", [])
-    dates = recent.get("filingDate", [])
-    accessions = recent.get("accessionNumber", [])
-    documents = recent.get("primaryDocument", [])
-    descriptions = recent.get("primaryDocDescription", [])
+    filing_sets = [data.get("filings", {}).get("recent", {})]
+    need_older = bool(year and str(year) not in {"最新", "不限", "全部", "latest"})
     results: list[LinkResult] = []
-    for form, filing_date, accession, document, description in zip(forms, dates, accessions, documents, descriptions):
-        if form not in wanted_forms:
-            continue
-        if not _matches_year(filing_date, year):
-            continue
-        primary_url, index_url = _archive_urls(normalized_cik, accession, document)
-        kind = next((key for key, values in FORM_MAP.items() if form in values), "filing")
-        title = f"{form} {filing_date} {description or document}".strip()
-        results.append(
-            LinkResult(
-                title=title,
-                url=primary_url,
-                source="SEC EDGAR",
-                date=filing_date,
-                form=form,
-                kind=kind,
-                index_url=index_url,
-                is_direct_file=True,
+    for filing_set in filing_sets:
+        forms = filing_set.get("form", [])
+        dates = filing_set.get("filingDate", [])
+        accessions = filing_set.get("accessionNumber", [])
+        documents = filing_set.get("primaryDocument", [])
+        descriptions = filing_set.get("primaryDocDescription", [""] * len(forms))
+        for form, filing_date, accession, document, description in zip(forms, dates, accessions, documents, descriptions):
+            if form not in wanted_forms:
+                continue
+            if not _matches_year(filing_date, year):
+                continue
+            primary_url, index_url = _archive_urls(normalized_cik, accession, document)
+            kind = next((key for key, values in FORM_MAP.items() if form in values), "filing")
+            title = f"{form} {filing_date} {description or document}".strip()
+            results.append(
+                LinkResult(
+                    title=title,
+                    url=primary_url,
+                    source="SEC EDGAR",
+                    date=filing_date,
+                    form=form,
+                    kind=kind,
+                    index_url=index_url,
+                    is_direct_file=True,
+                )
             )
-        )
+            if len(results) >= limit:
+                break
+            time.sleep(0.03)
         if len(results) >= limit:
             break
-        time.sleep(0.05)
+    if need_older and len(results) < limit:
+        for filing_set in _fetch_older_filing_sets(data):
+            forms = filing_set.get("form", [])
+            dates = filing_set.get("filingDate", [])
+            accessions = filing_set.get("accessionNumber", [])
+            documents = filing_set.get("primaryDocument", [])
+            descriptions = filing_set.get("primaryDocDescription", [""] * len(forms))
+            for form, filing_date, accession, document, description in zip(forms, dates, accessions, documents, descriptions):
+                if form not in wanted_forms or not _matches_year(filing_date, year):
+                    continue
+                primary_url, index_url = _archive_urls(normalized_cik, accession, document)
+                kind = next((key for key, values in FORM_MAP.items() if form in values), "filing")
+                results.append(
+                    LinkResult(
+                        title=f"{form} {filing_date} {description or document}".strip(),
+                        url=primary_url,
+                        source="SEC EDGAR",
+                        date=filing_date,
+                        form=form,
+                        kind=kind,
+                        index_url=index_url,
+                        is_direct_file=True,
+                    )
+                )
+                if len(results) >= limit:
+                    break
+            if len(results) >= limit:
+                break
 
     if include_exhibits and "presentation" in selected_kinds:
         results.extend(fetch_sec_exhibit_links(normalized_cik, selected_kinds, year=year, limit=10))
     return dedupe_links(results)
 
 
-def fetch_sec_exhibit_links(cik: str | int, kinds: list[str] | None = None, year: str | int | None = None, limit: int = 10) -> list[dict[str, Any]]:
-    try:
-        from bs4 import BeautifulSoup
-    except Exception:
-        return []
-    filings = fetch_sec_filings(cik, kinds=["presentation"], year=year, limit=20, include_exhibits=False)
-    results: list[LinkResult] = []
-    import requests
-
-    for filing in filings:
-        index_url = filing.get("index_url")
-        if not index_url:
+def _fetch_older_filing_sets(submissions: dict[str, Any]) -> list[dict[str, list[Any]]]:
+    older_sets: list[dict[str, list[Any]]] = []
+    for file_info in submissions.get("filings", {}).get("files", [])[:8]:
+        name = file_info.get("name", "")
+        if not name:
             continue
         try:
-            response = requests.get(index_url, timeout=8, headers={"User-Agent": "GlobalFilingResearchTool/1.0 research@example.com"})
-            response.raise_for_status()
+            data = request_json(f"https://data.sec.gov/submissions/{name}", timeout=10)
         except Exception:
             continue
-        soup = BeautifulSoup(response.text, "lxml")
-        table = soup.find("table", class_="tableFile")
-        if not table:
+        if isinstance(data, dict) and data.get("form"):
+            older_sets.append(data)
+        time.sleep(0.05)
+    return older_sets
+
+
+def fetch_sec_exhibit_links(cik: str | int, kinds: list[str] | None = None, year: str | int | None = None, limit: int = 10) -> list[dict[str, Any]]:
+    filings = fetch_sec_filings(cik, kinds=["presentation"], year=year, limit=20, include_exhibits=False)
+    results: list[LinkResult] = []
+
+    for filing in filings:
+        index_url = filing.get("index_url", "")
+        url = filing.get("url", "")
+        if not index_url or not url:
             continue
-        for row in table.find_all("tr"):
-            cells = [cell.get_text(" ", strip=True) for cell in row.find_all("td")]
-            if len(cells) < 4:
+        base_url = url.rsplit("/", 1)[0]
+        json_url = f"{base_url}/index.json"
+        try:
+            data = request_json(json_url, timeout=8)
+        except Exception:
+            continue
+        for item in data.get("directory", {}).get("item", []):
+            filename = item.get("name", "")
+            dtype = item.get("type", "")
+            combined = f"{filename} {dtype}".casefold()
+            if not filename:
                 continue
-            description = " ".join(cells).casefold()
-            if not any(token in description for token in ["presentation", "slides", "investor", "earnings"]):
+            if any(skip in combined for skip in ["-index", ".xsd", ".xml", ".jpg", ".png", ".gif", "xbrl"]):
                 continue
-            link = row.find("a")
-            if not link or not link.get("href"):
+            is_likely_exhibit = dtype.upper().startswith("EX-") or re.search(r"ex(?:99|10|hibit)", combined)
+            is_likely_presentation = any(token in combined for token in ["presentation", "slides", "deck", "investor", "earnings", "ex99", "ex-99"])
+            if not (is_likely_exhibit and is_likely_presentation):
                 continue
-            url = "https://www.sec.gov" + link["href"] if link["href"].startswith("/") else link["href"]
+            exhibit_url = f"{base_url}/{filename}"
             results.append(
                 LinkResult(
-                    title=f"8-K 附件 {cells[1] or cells[2]}",
-                    url=url,
+                    title=f"{filing.get('form', 'SEC')} 附件 {dtype or filename}",
+                    url=exhibit_url,
                     source="SEC EDGAR 附件",
                     date=filing.get("date", ""),
-                    form="8-K exhibit",
+                    form=f"{filing.get('form', '')} exhibit",
                     kind="presentation",
                     index_url=index_url,
                     is_direct_file=True,

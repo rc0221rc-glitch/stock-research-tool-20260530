@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 import os
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +20,7 @@ MODULE_NAMES = {
     "transcript": "src.transcript_fetcher",
     "table": "src.table_extractor",
     "excel": "src.excel_writer",
+    "packager": "src.download_packager",
     "utils": "src.utils",
 }
 
@@ -50,6 +52,8 @@ def init_state() -> None:
     st.session_state.setdefault("search_results", [])
     st.session_state.setdefault("selected_company", None)
     st.session_state.setdefault("filing_results", [])
+    st.session_state.setdefault("package_path", "")
+    st.session_state.setdefault("package_summary", {})
 
 
 def company_card(company: dict[str, Any], index: int) -> None:
@@ -151,13 +155,13 @@ def collect_filings(
         if transcript and "transcript" in kinds:
             transcript_items = [item for item in results if item.get("kind") == "transcript"]
             try:
-                transcript.download_transcripts(transcript_items, str(target_dir))
+                transcript.download_transcript_items(transcript_items, target_dir / "Transcripts", ticker=ticker)
             except Exception:
                 pass
         if ir and "presentation" in kinds:
             presentation_items = [item for item in results if item.get("kind") == "presentation"]
             try:
-                ir.download_presentations(presentation_items, str(target_dir))
+                ir.download_presentations(presentation_items, target_dir / "Presentations", ticker=ticker)
             except Exception:
                 pass
 
@@ -165,10 +169,49 @@ def collect_filings(
         if not results:
             return utils.fallback_links(company, kinds)
         results = utils.dedupe_links(results)
-        fallback = utils.fallback_links(company, kinds)
+        fallback = [
+            dict(item, source="搜索建议")
+            for item in utils.fallback_links(company, kinds)
+        ]
         existing = {item.get("url") for item in results}
         results.extend(item for item in fallback if item.get("url") not in existing)
     return results
+
+
+def create_zip_package(modules: dict[str, Any], company: dict[str, Any], items: list[dict[str, Any]]) -> tuple[str, dict[str, Any]]:
+    packager = modules.get("packager")
+    transcript = modules.get("transcript")
+    ir = modules.get("ir")
+    if not packager:
+        return "", {"error": "打包模块未加载"}
+    ticker = company.get("ticker") or company.get("local_code") or "company"
+    safe_ticker = "".join(ch for ch in str(ticker) if ch.isalnum() or ch in "-_") or "company"
+    root = Path("downloads") / safe_ticker
+    if root.exists():
+        shutil.rmtree(root, ignore_errors=True)
+    root.mkdir(parents=True, exist_ok=True)
+    extra_files: list[Path] = []
+    transcript_items = [item for item in items if item.get("kind") == "transcript"]
+    presentation_items = [item for item in items if item.get("kind") == "presentation"]
+    if transcript and transcript_items:
+        try:
+            extra_files.extend(transcript.download_transcript_items(transcript_items, root / "Transcripts", ticker=safe_ticker))
+        except Exception:
+            pass
+    if ir and presentation_items:
+        try:
+            extra_files.extend(ir.download_presentations(presentation_items, root / "Presentations", ticker=safe_ticker))
+        except Exception:
+            pass
+    general_items = [item for item in items if item not in transcript_items and item not in presentation_items]
+    zip_path, downloaded = packager.package_downloads(general_items, root, f"{safe_ticker}_documents", extra_files=extra_files)
+    summary = {
+        "downloaded": len(downloaded),
+        "extra": len(extra_files),
+        "total": len(downloaded) + len(extra_files),
+        "links": len(items),
+    }
+    return str(zip_path), summary
 
 
 def render_sidebar(module_errors: dict[str, str]) -> str:
@@ -255,6 +298,26 @@ def render_company_detail(modules: dict[str, Any], claude_api_key: str) -> None:
             grouped.setdefault(item.get("source", "其它"), []).append(item)
         for source, items in grouped.items():
             render_filing_group(source, items)
+        st.divider()
+        col_pack, col_download = st.columns([1, 1])
+        with col_pack:
+            if st.button("📦 下载并打包全部可下载文件", type="primary", use_container_width=True):
+                with st.spinner("正在下载直链文件、保存 transcript / presentation，并生成 ZIP…"):
+                    path, summary = create_zip_package(modules, company, st.session_state.filing_results)
+                    st.session_state.package_path = path
+                    st.session_state.package_summary = summary
+        with col_download:
+            package_path = Path(st.session_state.package_path) if st.session_state.package_path else None
+            if package_path and package_path.exists():
+                summary = st.session_state.package_summary or {}
+                st.success(f"已打包 {summary.get('total', 0)} 个文件，并附带 {summary.get('links', 0)} 条链接清单")
+                st.download_button(
+                    "下载 ZIP 文件包",
+                    data=package_path.read_bytes(),
+                    file_name=package_path.name,
+                    mime="application/zip",
+                    use_container_width=True,
+                )
 
 
 def render_table_extractor(modules: dict[str, Any], claude_api_key: str) -> None:

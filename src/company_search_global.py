@@ -401,15 +401,15 @@ LOCAL_COMPANIES: list[dict[str, Any]] = [
     {
         "name": "英飞凌",
         "name_en": "Infineon Technologies AG",
-        "ticker": "IFX",
+        "ticker": "IFNNY",
         "local_code": "IFX",
         "market": "欧洲",
-        "exchange": "XETRA",
+        "exchange": "XETRA / OTC ADR",
         "country": "德国",
         "flag": "🇩🇪",
         "ir_url": "https://www.infineon.com/cms/en/about-infineon/investor/",
         "cik": "",
-        "aliases": ["Infineon", "IFNNY"],
+        "aliases": ["Infineon", "IFNNY", "IFX"],
     },
     {
         "name": "SAP",

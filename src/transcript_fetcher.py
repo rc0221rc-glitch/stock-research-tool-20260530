@@ -1,58 +1,224 @@
 from __future__ import annotations
 
 import re
+import time
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any
-from urllib.parse import quote_plus
+from urllib.parse import parse_qs, quote_plus, urlparse
 
+import requests
 from bs4 import BeautifulSoup
 
-from .utils import LinkResult, dedupe_links, request_text, run_limited, search_url, url_exists
+from .utils import DEFAULT_HEADERS, LinkResult, clean_filename, dedupe_links, hard_timeout, request_text, run_limited, search_url, url_exists
 
 
-def _slug(value: str) -> str:
-    return re.sub(r"[^a-z0-9]+", "-", value.casefold()).strip("-")
+SESSION = requests.Session()
+SESSION.headers.update(DEFAULT_HEADERS)
 
 
-def _candidate_dates(filing_dates: list[str] | None) -> list[str]:
-    dates: list[str] = []
-    for value in filing_dates or []:
+def _company_slug(name: str, ticker: str) -> str:
+    name = (name or ticker).casefold()
+    suffixes = [
+        " inc.", " inc", " corp.", " corp", " corporation", " ltd.", " ltd", " limited",
+        " plc", " ag", " se", " sa", " nv", " company", " group", " holdings", " holding",
+        " technologies", " technology", " communications", " entertainment", " international",
+        " partners", " energy", " co.", " co",
+    ]
+    changed = True
+    while changed:
+        changed = False
+        for suffix in suffixes:
+            if name.endswith(suffix):
+                name = name[: -len(suffix)]
+                changed = True
+    slug = re.sub(r"[^a-z0-9\s]", "", name)
+    return re.sub(r"\s+", "-", slug.strip()) or ticker.casefold()
+
+
+def _normalize_date(value: str) -> str:
+    value = (value or "").strip()
+    for fmt in ("%Y-%m-%d", "%Y%m%d", "%Y/%m/%d"):
         try:
-            base = datetime.strptime(value[:10], "%Y-%m-%d")
+            return datetime.strptime(value[:10], fmt).strftime("%Y%m%d")
         except Exception:
             continue
-        for delta in [-1, 0, 1]:
-            dates.append((base + timedelta(days=delta)).strftime("%Y-%m-%d"))
-    return dates[:9]
+    return ""
 
 
-def _motley_candidates(ticker: str, company_name: str, dates: list[str]) -> list[LinkResult]:
-    ticker_slug = _slug(ticker)
-    company_slug = _slug(company_name)
-    templates = [
-        "https://www.fool.com/earnings/call-transcripts/{date}/{ticker}-{company}-earnings-call-transcript/",
-        "https://www.fool.com/earnings/call-transcripts/{date}/{ticker}-q{quarter}-earnings-call-transcript/",
+def _quarter_info(date_str: str, yahoo_info: dict[str, dict[str, str]] | None = None) -> tuple[str, str]:
+    yahoo = (yahoo_info or {}).get(date_str, {})
+    if yahoo.get("quarter") and yahoo.get("fy"):
+        return yahoo["quarter"], yahoo["fy"]
+    dt = datetime.strptime(date_str, "%Y%m%d")
+    q_map = {1: "4", 2: "4", 3: "4", 4: "1", 5: "1", 6: "1", 7: "2", 8: "2", 9: "2", 10: "3", 11: "3", 12: "3"}
+    quarter = q_map.get(dt.month, "1")
+    fiscal_year = str(dt.year - 1 if dt.month <= 3 else dt.year)
+    return quarter, fiscal_year
+
+
+def _motley_fool_urls(ticker: str, company_name: str, date_str: str, quarter: str, fiscal_year: str) -> list[str]:
+    slug = _company_slug(company_name, ticker)
+    ticker_slug = ticker.casefold().replace(".", "-")
+    y, m, d = date_str[:4], date_str[4:6], date_str[6:8]
+    base = f"https://www.fool.com/earnings/call-transcripts/{y}/{m}/{d}/"
+    return [
+        f"{base}{slug}-{ticker_slug}-q{quarter}-{fiscal_year}-earnings-call-transcript/",
+        f"{base}{slug}-{ticker_slug}-q{quarter}-{fiscal_year}-earnings-transcript/",
+        f"{base}{ticker_slug}-q{quarter}-{fiscal_year}-earnings-call-transcript/",
+        f"{base}{ticker_slug}-q{quarter}-{fiscal_year}-earnings-transcript/",
+        f"{base}{ticker_slug}-{slug}-earnings-call-transcript/",
     ]
-    quarters = ["1", "2", "3", "4"]
+
+
+def _get_earnings_info_uncached(ticker: str) -> tuple[list[dict[str, str]], str, str]:
+    results: list[dict[str, str]] = []
+    company_name = ""
+    website = ""
+    try:
+        import yfinance as yf
+
+        stock = yf.Ticker(ticker)
+        info = stock.info or {}
+        company_name = info.get("longName") or info.get("shortName") or ""
+        website = info.get("website") or ""
+        earnings = stock.earnings_dates
+        if earnings is not None and not earnings.empty:
+            for dt in earnings.index[:16]:
+                date_str = dt.strftime("%Y%m%d")
+                quarter, fiscal_year = _quarter_info(date_str)
+                results.append({"date": date_str, "quarter": quarter, "fy": fiscal_year})
+    except Exception:
+        pass
+    return results, company_name, website
+
+
+def _get_earnings_info(ticker: str) -> tuple[list[dict[str, str]], str, str]:
+    return hard_timeout(_get_earnings_info_uncached, ticker, timeout=6, default=([], "", ""))
+
+
+def _candidate_dates(filing_dates: list[str] | None, ticker: str) -> tuple[list[str], dict[str, dict[str, str]], str, str]:
+    yahoo_dates, yahoo_name, website = _get_earnings_info(ticker)
+    yahoo_map = {item["date"]: item for item in yahoo_dates}
+    dates = {_normalize_date(value) for value in (filing_dates or [])}
+    dates = {value for value in dates if value}
+    dates.update(item["date"] for item in yahoo_dates)
+    if not dates:
+        today = datetime.now()
+        dates.update((today - timedelta(days=90 * index)).strftime("%Y%m%d") for index in range(8))
+    return sorted(dates, reverse=True)[:16], yahoo_map, yahoo_name, website
+
+
+def _motley_candidates(ticker: str, company_name: str, dates: list[str], yahoo_info: dict[str, dict[str, str]]) -> list[LinkResult]:
     candidates: list[LinkResult] = []
-    for date in dates[:6]:
-        for template in templates:
-            if "{quarter}" in template:
-                for quarter in quarters:
-                    url = template.format(date=date, ticker=ticker_slug, company=company_slug, quarter=quarter)
-                    if url_exists(url, timeout=4, must_contain="transcript"):
-                        candidates.append(LinkResult(f"Motley Fool Transcript {date}", url, "Motley Fool", date=date, kind="transcript", is_direct_file=False))
-            else:
-                url = template.format(date=date, ticker=ticker_slug, company=company_slug, quarter="")
-                if url_exists(url, timeout=4, must_contain="transcript"):
-                    candidates.append(LinkResult(f"Motley Fool Transcript {date}", url, "Motley Fool", date=date, kind="transcript", is_direct_file=False))
+    checked: set[str] = set()
+    for date_str in dates[:8]:
+        try:
+            base_dt = datetime.strptime(date_str, "%Y%m%d")
+        except Exception:
+            continue
+        quarter, fiscal_year = _quarter_info(date_str, yahoo_info)
+        found_for_date = False
+        for offset in (0, -1, 1):
+            if found_for_date:
+                break
+            shifted = (base_dt + timedelta(days=offset)).strftime("%Y%m%d")
+            for url in _motley_fool_urls(ticker, company_name, shifted, quarter, fiscal_year):
+                if url in checked:
+                    continue
+                checked.add(url)
+                if url_exists(url, timeout=5, must_contain="transcript"):
+                    candidates.append(
+                        LinkResult(
+                            title=f"{ticker.upper()} Q{quarter} FY{fiscal_year} Earnings Call Transcript",
+                            url=url,
+                            source="Motley Fool",
+                            date=shifted,
+                            kind="transcript",
+                            is_direct_file=False,
+                        )
+                    )
+                    found_for_date = True
+                    break
     return candidates
 
 
-def _duckduckgo_search(query: str, max_results: int = 5) -> list[LinkResult]:
-    url = f"https://duckduckgo.com/html/?q={quote_plus(query)}"
+def _stockanalysis_transcripts(ticker: str) -> list[LinkResult]:
+    ticker_path = ticker.lower().replace(".", "-")
+    archive_url = f"https://stockanalysis.com/stocks/{ticker_path}/earnings/transcripts/"
     try:
-        html = request_text(url, timeout=6)
+        html = request_text(archive_url, timeout=8)
+    except Exception:
+        return []
+    soup = BeautifulSoup(html, "lxml")
+    results: list[LinkResult] = []
+    for link in soup.select("a[href*='/transcripts/']"):
+        href = link.get("href") or ""
+        text = link.get_text(" ", strip=True)
+        if not href or not text or href.rstrip("/").endswith("/transcripts"):
+            continue
+        full_url = f"https://stockanalysis.com{href}" if href.startswith("/") else href
+        results.append(LinkResult(f"{ticker.upper()} {text} Transcript", full_url, "Stock Analysis", kind="transcript", is_direct_file=False))
+    if not results and url_exists(archive_url, timeout=5):
+        results.append(LinkResult(f"{ticker.upper()} transcript archive", archive_url, "Stock Analysis", kind="transcript", is_direct_file=False))
+    return results
+
+
+def _domain_from_url(url: str) -> str:
+    if not url:
+        return ""
+    parsed = urlparse(url)
+    return (parsed.netloc or parsed.path).replace("www.", "").strip("/")
+
+
+def _try_q4_transcripts(ir_domain: str, ticker: str) -> list[LinkResult]:
+    if not ir_domain:
+        return []
+    try:
+        response = SESSION.get(f"https://{ir_domain}/feed/Event.svc/GetEventList", timeout=8)
+        response.raise_for_status()
+        data = response.json()
+    except Exception:
+        return []
+    results: list[LinkResult] = []
+    for event in data.get("GetEventListResult", []):
+        if not isinstance(event, dict):
+            continue
+        event_title = event.get("Title", "")
+        start_date = event.get("StartDate", "")
+        event_date = ""
+        if start_date:
+            for fmt in ("%m/%d/%Y", "%Y-%m-%d", "%m/%d/%y"):
+                try:
+                    event_date = datetime.strptime(start_date[:10], fmt).strftime("%Y%m%d")
+                    break
+                except ValueError:
+                    continue
+        for attachment in event.get("Attachments", []):
+            if not isinstance(attachment, dict):
+                continue
+            url = attachment.get("Url", "")
+            title = attachment.get("Title", "")
+            ext = (attachment.get("Extension") or "").upper()
+            combined = f"{title} {url}".casefold()
+            if not url or ext != "PDF":
+                continue
+            if any(keyword in combined for keyword in ["prepared remarks", "remarks", "transcript", "conference call", "earnings call"]):
+                results.append(LinkResult(f"{ticker.upper()} {event_title} - {title}", url, "IR (Q4)", date=event_date, kind="transcript", is_direct_file=True))
+    return results
+
+
+def _extract_ddg_url(href: str) -> str:
+    if "duckduckgo.com" not in href.casefold():
+        return href
+    parsed = urlparse(href)
+    params = parse_qs(parsed.query)
+    return params.get("uddg", [""])[0]
+
+
+def _duckduckgo_search(query: str, max_results: int = 6) -> list[LinkResult]:
+    try:
+        html = request_text(f"https://html.duckduckgo.com/html/?q={quote_plus(query)}", timeout=8)
     except Exception:
         return []
     soup = BeautifulSoup(html, "lxml")
@@ -61,20 +227,36 @@ def _duckduckgo_search(query: str, max_results: int = 5) -> list[LinkResult]:
         link = item.select_one(".result__a")
         if not link:
             continue
-        href = link.get("href") or ""
+        real_url = _extract_ddg_url(link.get("href") or "")
         title = link.get_text(" ", strip=True)
-        if not href or not title:
+        combined = f"{title} {real_url}".casefold()
+        if not real_url:
             continue
-        results.append(LinkResult(title, href, "网页搜索", kind="transcript", is_direct_file=False))
+        if any(keyword in combined for keyword in ["transcript", "earnings call", "conference call", "prepared remarks", "quarterly earnings"]):
+            results.append(LinkResult(title, real_url, "网页搜索", kind="transcript", is_direct_file=real_url.casefold().endswith(".pdf")))
     return results
 
 
-def _stockanalysis_search(ticker: str) -> list[LinkResult]:
-    ticker = ticker.upper().replace(".", "-")
-    archive = f"https://stockanalysis.com/stocks/{ticker.lower()}/earnings/transcripts/"
-    if url_exists(archive, timeout=5):
-        return [LinkResult(f"{ticker} transcript archive", archive, "Stock Analysis", kind="transcript", is_direct_file=False)]
-    return []
+def _transcript_search_jobs(ticker: str, company_name: str, website: str) -> list[tuple[Any, tuple[Any, ...], dict[str, Any]]]:
+    search_name = company_name or ticker
+    jobs: list[tuple[Any, tuple[Any, ...], dict[str, Any]]] = [
+        (_stockanalysis_transcripts, (ticker,), {}),
+        (_duckduckgo_search, (f"{search_name} {ticker} earnings call transcript", 6), {}),
+        (_duckduckgo_search, (f"{search_name} quarterly earnings call transcript", 5), {}),
+        (_duckduckgo_search, (f"site:fool.com {search_name} {ticker} earnings call transcript", 4), {}),
+        (_duckduckgo_search, (f"site:seekingalpha.com {search_name} earnings call transcript", 4), {}),
+        (_duckduckgo_search, (f"site:marketbeat.com {search_name} earnings call transcript", 4), {}),
+        (_duckduckgo_search, (f"site:investing.com {search_name} earnings transcript", 4), {}),
+    ]
+    domain = _domain_from_url(website)
+    domains = []
+    if domain:
+        domains.extend([f"investor.{domain}", f"ir.{domain}", f"investors.{domain}"])
+    ticker_slug = ticker.lower().replace(".", "")
+    domains.extend([f"investor.{ticker_slug}.com", f"ir.{ticker_slug}.com", f"investors.{ticker_slug}.com"])
+    for domain in dict.fromkeys(domains):
+        jobs.append((_try_q4_transcripts, (domain, ticker), {}))
+    return jobs
 
 
 def _claude_fallback(ticker: str, company_name: str, claude_api_key: str) -> list[LinkResult]:
@@ -116,52 +298,131 @@ def find_transcripts(
     company_name: str,
     filing_dates: list[str] | None = None,
     claude_api_key: str = "",
-    max_results: int = 8,
+    max_results: int = 12,
 ) -> list[dict[str, Any]]:
     ticker = (ticker or "").strip()
-    company_name = (company_name or ticker).strip()
-    if not ticker and not company_name:
+    if not ticker:
         return []
-
-    dates = _candidate_dates(filing_dates)
-    jobs = [
-        (_motley_candidates, (ticker, company_name, dates), {}),
-        (_stockanalysis_search, (ticker,), {}),
-        (_duckduckgo_search, (f"{ticker} {company_name} earnings call transcript", 5), {}),
-        (_duckduckgo_search, (f"site:fool.com {ticker} earnings call transcript", 3), {}),
-        (_duckduckgo_search, (f"site:seekingalpha.com {company_name} earnings call transcript", 3), {}),
-    ]
+    dates, yahoo_info, yahoo_name, website = _candidate_dates(filing_dates, ticker)
+    company_name = (company_name or yahoo_name or ticker).strip()
     results: list[LinkResult] = []
-    search_results = run_limited(jobs, per_job_timeout=6, total_timeout=20, max_workers=4)
-    for group in search_results:
+
+    motley = run_limited([(_motley_candidates, (ticker, company_name, dates, yahoo_info), {})], per_job_timeout=8, total_timeout=9, max_workers=1)
+    for group in motley:
+        if isinstance(group, list):
+            results.extend(group)
+
+    for group in run_limited(_transcript_search_jobs(ticker, company_name, website), per_job_timeout=6, total_timeout=16, max_workers=5):
         if isinstance(group, list):
             results.extend(group)
         if len(results) >= max_results:
             break
+
     if len(results) < 2 and claude_api_key:
         results.extend(_claude_fallback(ticker, company_name, claude_api_key))
     if not results:
-        results.append(LinkResult("Transcript 网页搜索", search_url(f"{ticker} {company_name} earnings call transcript"), "兜底链接", kind="transcript", is_direct_file=False, note="自动发现失败，可用搜索链接继续查找。"))
+        results.append(LinkResult("未找到 Transcript，打开搜索建议", search_url(f"{ticker} {company_name} earnings call transcript"), "搜索建议", kind="transcript", is_direct_file=False, note="自动发现失败，可用搜索链接继续查找。"))
     return dedupe_links(results)[:max_results]
 
 
-def download_transcripts(items: list[dict[str, Any]], target_dir: str) -> list[str]:
-    import os
-    import requests
+def _extract_transcript_text(html_content: str) -> str | None:
+    soup = BeautifulSoup(html_content, "lxml")
+    selectors = [
+        "#transcript-panel-full",
+        "div.space-y-6.text-base",
+        "div.article-body",
+        "div.prose",
+        "div.post-content",
+        "div.article-content",
+        "section.article-body",
+        "div.transcript-body",
+        "div[itemprop='articleBody']",
+        "article",
+        "div.entry-content",
+        "main article",
+        "div.WYSIWYG",
+        "div.article_wrapper",
+        "#article_text",
+        "#content-body",
+    ]
+    content = None
+    for selector in selectors:
+        content = soup.select_one(selector)
+        if content:
+            break
+    if not content:
+        candidates = []
+        for node in soup.find_all(["div", "article", "section", "main"]):
+            text = node.get_text(" ", strip=True)
+            if len(text) < 2000:
+                continue
+            score = sum(keyword in text.casefold() for keyword in ["operator", "earnings call", "conference call", "prepared remarks", "question-and-answer", "q&a"])
+            if score >= 2:
+                candidates.append((score, len(text), node))
+        if candidates:
+            candidates.sort(reverse=True, key=lambda item: (item[0], item[1]))
+            content = candidates[0][2]
+    if not content:
+        return None
+    paragraphs = []
+    for node in content.find_all(["p", "div", "section"]):
+        text = node.get_text(" ", strip=True)
+        if len(text) <= 30:
+            continue
+        first = text.casefold()[:80]
+        if any(skip in first for skip in ["cookie", "advertisement", "subscribe", "sign up", "login", "menu", "share this article"]):
+            continue
+        paragraphs.append(text)
+    if not paragraphs:
+        text = content.get_text("\n\n", strip=True)
+        if len(text) > 500:
+            paragraphs = [text]
+    return "\n\n".join(paragraphs) if paragraphs else None
 
-    os.makedirs(target_dir, exist_ok=True)
-    saved: list[str] = []
+
+def download_transcript_items(items: list[dict[str, Any]], target_dir: str | Path, ticker: str = "") -> list[Path]:
+    target = Path(target_dir)
+    target.mkdir(parents=True, exist_ok=True)
+    saved: list[Path] = []
     for index, item in enumerate(items, start=1):
         url = item.get("url", "")
-        if not url:
+        if not url or item.get("source") == "兜底链接":
             continue
+        title = item.get("title") or f"transcript_{index}"
+        prefix = clean_filename(f"{ticker}_{item.get('source', 'web')}_{title}", "transcript")[:100]
         try:
-            response = requests.get(url, timeout=10, headers={"User-Agent": "GlobalFilingResearchTool/1.0 research@example.com"})
+            response = SESSION.get(url, timeout=18, allow_redirects=True)
             response.raise_for_status()
         except Exception:
             continue
-        path = os.path.join(target_dir, f"transcript_{index}.html")
-        with open(path, "w", encoding="utf-8") as file:
-            file.write(response.text)
+        content_type = response.headers.get("Content-Type", "")
+        is_pdf = ".pdf" in url.casefold() or "pdf" in content_type.casefold()
+        if is_pdf:
+            path = target / f"{prefix}.pdf"
+            path.write_bytes(response.content)
+            saved.append(path)
+            continue
+        text = _extract_transcript_text(response.text)
+        if text and len(text) > 500:
+            path = target / f"{prefix}.txt"
+            path.write_text(
+                f"Title: {title}\nSource: {item.get('source', '')}\nURL: {url}\n{'=' * 60}\n\n{text}",
+                encoding="utf-8",
+            )
+        else:
+            path = target / f"{prefix}.html"
+            path.write_text(response.text, encoding="utf-8", errors="ignore")
         saved.append(path)
+        time.sleep(0.2)
     return saved
+
+
+def download_transcripts(*args: Any, **kwargs: Any) -> list[Any]:
+    if args and isinstance(args[0], list):
+        return [str(path) for path in download_transcript_items(args[0], args[1], kwargs.get("ticker", ""))]
+    ticker = args[0] if args else kwargs.get("ticker", "")
+    filing_dates = args[1] if len(args) > 1 else kwargs.get("filing_dates", [])
+    output_dir = args[2] if len(args) > 2 else kwargs.get("output_dir", "downloads")
+    company_name = kwargs.get("company_name", "")
+    transcripts = find_transcripts(ticker, company_name, filing_dates)
+    return download_transcript_items(transcripts, output_dir, ticker)
