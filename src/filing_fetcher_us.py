@@ -38,6 +38,54 @@ def _matches_year(filing_date: str, year: str | int | None, tolerance: int = 1) 
     return abs(filing_year - target_year) <= tolerance
 
 
+def _matches_report_year(report_date: str, filing_date: str, year: str | int | None) -> bool:
+    if not year or str(year) in {"最新", "不限", "全部", "latest"}:
+        return True
+    try:
+        target_year = int(year)
+    except Exception:
+        return True
+    value = report_date or filing_date
+    if not value:
+        return True
+    try:
+        return int(str(value)[:4]) == target_year
+    except Exception:
+        return True
+
+
+def _is_relevant_filing(form: str, kind: str, document: str, description: str) -> bool:
+    if form != "6-K" or kind not in {"quarterly", "annual"}:
+        return True
+    combined = f"{document} {description}".casefold()
+    include_tokens = [
+        "20-f",
+        "annual",
+        "quarter",
+        "q1",
+        "q2",
+        "q3",
+        "q4",
+        "fsx",
+        "financial",
+        "results",
+        "earnings",
+        "interim",
+    ]
+    exclude_tokens = [
+        "monthend",
+        "revenue",
+        "dividend",
+        "board",
+        "director",
+        "agm",
+        "treasurer",
+        "media",
+        "statement",
+    ]
+    return any(token in combined for token in include_tokens) and not any(token in combined for token in exclude_tokens)
+
+
 def fetch_sec_filings(
     cik: str | int,
     kinds: list[str] | None = None,
@@ -63,16 +111,19 @@ def fetch_sec_filings(
     for filing_set in filing_sets:
         forms = filing_set.get("form", [])
         dates = filing_set.get("filingDate", [])
+        report_dates = filing_set.get("reportDate", [""] * len(forms))
         accessions = filing_set.get("accessionNumber", [])
         documents = filing_set.get("primaryDocument", [])
         descriptions = filing_set.get("primaryDocDescription", [""] * len(forms))
-        for form, filing_date, accession, document, description in zip(forms, dates, accessions, documents, descriptions):
+        for form, filing_date, report_date, accession, document, description in zip(forms, dates, report_dates, accessions, documents, descriptions):
             if form not in wanted_forms:
                 continue
-            if not _matches_year(filing_date, year):
+            if not _matches_report_year(report_date, filing_date, year):
                 continue
             primary_url, index_url = _archive_urls(normalized_cik, accession, document)
             kind = next((key for key, values in FORM_MAP.items() if form in values), "filing")
+            if not _is_relevant_filing(form, kind, document, description):
+                continue
             title = f"{form} {filing_date} {description or document}".strip()
             results.append(
                 LinkResult(
@@ -95,14 +146,17 @@ def fetch_sec_filings(
         for filing_set in _fetch_older_filing_sets(data):
             forms = filing_set.get("form", [])
             dates = filing_set.get("filingDate", [])
+            report_dates = filing_set.get("reportDate", [""] * len(forms))
             accessions = filing_set.get("accessionNumber", [])
             documents = filing_set.get("primaryDocument", [])
             descriptions = filing_set.get("primaryDocDescription", [""] * len(forms))
-            for form, filing_date, accession, document, description in zip(forms, dates, accessions, documents, descriptions):
-                if form not in wanted_forms or not _matches_year(filing_date, year):
+            for form, filing_date, report_date, accession, document, description in zip(forms, dates, report_dates, accessions, documents, descriptions):
+                if form not in wanted_forms or not _matches_report_year(report_date, filing_date, year):
                     continue
                 primary_url, index_url = _archive_urls(normalized_cik, accession, document)
                 kind = next((key for key, values in FORM_MAP.items() if form in values), "filing")
+                if not _is_relevant_filing(form, kind, document, description):
+                    continue
                 results.append(
                     LinkResult(
                         title=f"{form} {filing_date} {description or document}".strip(),
@@ -122,6 +176,31 @@ def fetch_sec_filings(
 
     if include_exhibits and "presentation" in selected_kinds:
         results.extend(fetch_sec_exhibit_links(normalized_cik, selected_kinds, year=year, limit=10))
+    return dedupe_links(results)
+
+
+def fetch_sec_filings_for_years(
+    cik: str | int,
+    kinds: list[str] | None = None,
+    years: list[str] | None = None,
+    limit_per_year: int = 20,
+    include_exhibits: bool = False,
+) -> list[dict[str, Any]]:
+    selected_years = [str(year) for year in (years or []) if str(year).isdigit()]
+    if not selected_years:
+        return fetch_sec_filings(cik, kinds=kinds, year=None, limit=limit_per_year, include_exhibits=include_exhibits)
+
+    results: list[dict[str, Any]] = []
+    for year in selected_years:
+        results.extend(
+            fetch_sec_filings(
+                cik,
+                kinds=kinds,
+                year=year,
+                limit=limit_per_year,
+                include_exhibits=include_exhibits,
+            )
+        )
     return dedupe_links(results)
 
 

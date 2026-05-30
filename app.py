@@ -17,6 +17,7 @@ MODULE_NAMES = {
     "company_search": "src.company_search_global",
     "sec": "src.filing_fetcher_us",
     "hkex": "src.hkex_fetcher",
+    "cninfo": "src.cninfo_fetcher",
     "ir": "src.ir_scraper",
     "transcript": "src.transcript_fetcher",
     "china": "src.china_sources",
@@ -122,6 +123,7 @@ def collect_filings(
 ) -> list[dict[str, Any]]:
     results: list[dict[str, Any]] = []
     sec = modules.get("sec")
+    cninfo = modules.get("cninfo")
     ir = modules.get("ir")
     transcript = modules.get("transcript")
     china = modules.get("china")
@@ -129,11 +131,16 @@ def collect_filings(
     platforms = modules.get("platforms")
     utils = modules.get("utils")
     selected_years = [years] if isinstance(years, str) and years else list(years or [])
-    sec_year = selected_years[0] if len(selected_years) == 1 else ""
     sec_kinds = [kind for kind in kinds if kind in {"annual", "quarterly", "prospectus", "presentation", "proxy"}]
     if sec and company.get("cik") and sec_kinds:
         try:
-            results.extend(sec.fetch_sec_filings(company["cik"], kinds=sec_kinds, year=sec_year, limit=50, include_exhibits=("presentation" in kinds)))
+            results.extend(sec.fetch_sec_filings_for_years(company["cik"], kinds=sec_kinds, years=selected_years, limit_per_year=20, include_exhibits=("presentation" in kinds)))
+        except Exception:
+            pass
+
+    if cninfo and any(kind in kinds for kind in ["annual", "quarterly"]):
+        try:
+            results.extend(cninfo.fetch_cninfo_filings(company, kinds=kinds, years=selected_years, quarters=quarters or [], limit=50))
         except Exception:
             pass
 
@@ -211,7 +218,7 @@ def filter_results_by_years(items: list[dict[str, Any]], years: list[str]) -> li
         return items
     selected = set(years)
     filtered: list[dict[str, Any]] = []
-    strict_sources = {"SEC EDGAR", "SEC EDGAR 附件", "港交所披露易", "IR 官网", "IR 官网 Presentation", "IR (Q4 Events)"}
+    strict_sources = {"SEC EDGAR", "SEC EDGAR 附件", "巨潮资讯官方公告", "港交所披露易", "IR 官网", "IR 官网 Presentation", "IR (Q4 Events)"}
     for item in items:
         source = str(item.get("source", ""))
         if source not in strict_sources:
@@ -281,7 +288,7 @@ def render_sidebar(module_errors: dict[str, str]) -> str:
         )
         st.divider()
         st.subheader("数据来源")
-        st.caption("SEC EDGAR、港交所披露易、公司 IR 官网、微信公众号 / 中文投研网页搜索、Bing 定向搜索、Transcript / Presentation 平台深搜。")
+        st.caption("SEC EDGAR、巨潮资讯、港交所披露易、公司 IR 官网、微信公众号 / 中文投研网页搜索、Bing 定向搜索、Transcript / Presentation 平台深搜。")
         st.caption("仅供学习研究，请遵守各数据源使用条款。")
         st.subheader("已知限制")
         st.caption("A 股、部分港股与欧洲公司可能只能提供官方平台跳转。扫描版 PDF 无法直接提取表格。")

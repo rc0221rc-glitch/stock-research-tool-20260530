@@ -5,7 +5,8 @@
 ## 功能
 
 - 全球公司模糊搜索：内置美股、港股、A 股、台股、韩股、日股、欧洲知名公司样本，并可用 SEC 全量公司列表搜索美股。
-- 公开文件发现：支持 SEC EDGAR、港交所披露易、公司 IR 官网、Bing 定向搜索和网页搜索兜底。
+- 公开文件发现：支持 SEC EDGAR、巨潮资讯、港交所披露易、公司 IR 官网、Bing 定向搜索和网页搜索兜底。
+- 官方公告底线：勾选年报 / 季报时，美股优先返回 SEC 10-K / 10-Q / 20-F / 6-K；A 股、科创板和部分中概 / 港股回 A 公司优先返回巨潮资讯官方 PDF。
 - 中国公司增强来源：对 A 股、港股和中概股增加微信公众号 / Sogou 微信、雪球、东方财富、华尔街见闻、CNINFO 等中文投研与公告搜索入口。
 - Transcript / Presentation 平台深搜：额外覆盖 Seeking Alpha、Motley Fool、Stock Analysis、MarketScreener、AlphaSpread、GuruFocus、MarketBeat、Investing.com、AlphaStreet、Q4、PR Newswire、BusinessWire、GlobeNewswire、Quartr、TIKR、Koyfin、BamSEC 等公开页面或搜索入口。
 - Bing 定向搜索：按公司别名、年份、季度和文件类型组合逐一搜索，优先保留企业官网、公告平台和可直接下载的 PDF 链接。
@@ -49,7 +50,8 @@ streamlit run app.py
 
 ## 数据源说明
 
-- SEC EDGAR：通过 `data.sec.gov/submissions/CIKxxxxxxxxxx.json` 获取 10-K、20-F、10-Q、6-K、S-1、F-1、424B4、DEF 14A 等文件。
+- SEC EDGAR：通过 `data.sec.gov/submissions/CIKxxxxxxxxxx.json` 获取 10-K、20-F、10-Q、6-K、S-1、F-1、424B4、DEF 14A 等文件；多选年份时逐年拉取，保证年报 / 季报官方文件优先出现。
+- 巨潮资讯：通过 `cninfo.com.cn` 官方公告接口获取 A 股、科创板等公司的年度报告、一季报、半年报和三季报 PDF。
 - 港交所披露易：通过公开 handler 接口尝试获取年报、中报与招股书。
 - 公司 IR 官网：抓取官方投资者关系页面中的 PDF、报告和演示材料链接。
 - 中文投研来源：对中国公司生成并抓取业绩会纪要、电话会纪要、交流纪要、微信公众号文章、雪球讨论和中文公告搜索结果。
@@ -76,6 +78,7 @@ stock-research-tool/
     ├── company_search_global.py
     ├── filing_fetcher_us.py
     ├── hkex_fetcher.py
+    ├── cninfo_fetcher.py
     ├── ir_scraper.py
     ├── transcript_fetcher.py
     ├── china_sources.py
