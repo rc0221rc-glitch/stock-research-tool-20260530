@@ -20,6 +20,7 @@ MODULE_NAMES = {
     "ir": "src.ir_scraper",
     "transcript": "src.transcript_fetcher",
     "china": "src.china_sources",
+    "bing": "src.bing_discovery",
     "platforms": "src.platform_discovery",
     "table": "src.table_extractor",
     "excel": "src.excel_writer",
@@ -124,6 +125,7 @@ def collect_filings(
     ir = modules.get("ir")
     transcript = modules.get("transcript")
     china = modules.get("china")
+    bing = modules.get("bing")
     platforms = modules.get("platforms")
     utils = modules.get("utils")
     selected_years = [years] if isinstance(years, str) and years else list(years or [])
@@ -146,6 +148,12 @@ def collect_filings(
     if china and any(kind in kinds for kind in ["annual", "quarterly", "transcript", "presentation"]):
         try:
             results.extend(china.find_china_research_links(company, kinds=kinds, years=selected_years, quarters=quarters or [], max_results=24))
+        except Exception:
+            pass
+
+    if bing and any(kind in kinds for kind in ["annual", "quarterly", "transcript", "presentation", "prospectus", "proxy"]):
+        try:
+            results.extend(bing.find_bing_targeted_links(company, kinds=kinds, years=selected_years, quarters=quarters or [], max_results=36, max_search_attempts=18))
         except Exception:
             pass
 
@@ -273,7 +281,7 @@ def render_sidebar(module_errors: dict[str, str]) -> str:
         )
         st.divider()
         st.subheader("数据来源")
-        st.caption("SEC EDGAR、港交所披露易、公司 IR 官网、微信公众号 / 中文投研网页搜索、Transcript / Presentation 平台深搜。")
+        st.caption("SEC EDGAR、港交所披露易、公司 IR 官网、微信公众号 / 中文投研网页搜索、Bing 定向搜索、Transcript / Presentation 平台深搜。")
         st.caption("仅供学习研究，请遵守各数据源使用条款。")
         st.subheader("已知限制")
         st.caption("A 股、部分港股与欧洲公司可能只能提供官方平台跳转。扫描版 PDF 无法直接提取表格。")

@@ -5,9 +5,10 @@
 ## 功能
 
 - 全球公司模糊搜索：内置美股、港股、A 股、台股、韩股、日股、欧洲知名公司样本，并可用 SEC 全量公司列表搜索美股。
-- 公开文件发现：支持 SEC EDGAR、港交所披露易、公司 IR 官网、网页搜索兜底。
+- 公开文件发现：支持 SEC EDGAR、港交所披露易、公司 IR 官网、Bing 定向搜索和网页搜索兜底。
 - 中国公司增强来源：对 A 股、港股和中概股增加微信公众号 / Sogou 微信、雪球、东方财富、华尔街见闻、CNINFO 等中文投研与公告搜索入口。
 - Transcript / Presentation 平台深搜：额外覆盖 Seeking Alpha、Motley Fool、Stock Analysis、MarketScreener、AlphaSpread、GuruFocus、MarketBeat、Investing.com、AlphaStreet、Q4、PR Newswire、BusinessWire、GlobeNewswire、Quartr、TIKR、Koyfin、BamSEC 等公开页面或搜索入口。
+- Bing 定向搜索：按公司别名、年份、季度和文件类型组合逐一搜索，优先保留企业官网、公告平台和可直接下载的 PDF 链接。
 - 文件类型筛选：年度报告、季度 / 中期报告、招股说明书、Transcript、Presentation、Proxy。
 - 自动表格提取：下载文件打包时会同步从文字版 PDF / HTML 中提取表格，并用 `openpyxl` 生成每表一个 Sheet 的 Excel。
 - 可选 Claude 增强：输入 Anthropic API Key 后，可用于 Sheet 智能命名和自动发现失败时的兜底建议。
@@ -52,6 +53,7 @@ streamlit run app.py
 - 港交所披露易：通过公开 handler 接口尝试获取年报、中报与招股书。
 - 公司 IR 官网：抓取官方投资者关系页面中的 PDF、报告和演示材料链接。
 - 中文投研来源：对中国公司生成并抓取业绩会纪要、电话会纪要、交流纪要、微信公众号文章、雪球讨论和中文公告搜索结果。
+- Bing 定向搜索：按所选年份 / 季度 / 文件类型生成查询词，例如“公司名 2025 Q1 earnings presentation filetype:pdf”或“公司名 2025 一季度 业绩会纪要”，解析前排结果并过滤广告、社交媒体和弱相关链接。
 - Transcript / Presentation：通过 Motley Fool、Stock Analysis、MarketScreener、AlphaSpread、Seeking Alpha、Q4/Notified/EQS/Investis 等 IR 托管和资讯平台，以及 Quartr、TIKR、Koyfin、BamSEC 等平台入口发现。
 
 ## 已知限制
@@ -76,6 +78,10 @@ stock-research-tool/
     ├── hkex_fetcher.py
     ├── ir_scraper.py
     ├── transcript_fetcher.py
+    ├── china_sources.py
+    ├── platform_discovery.py
+    ├── bing_discovery.py
+    ├── download_packager.py
     ├── table_extractor.py
     ├── excel_writer.py
     └── utils.py
