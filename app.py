@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib
 import os
 import shutil
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +19,7 @@ MODULE_NAMES = {
     "hkex": "src.hkex_fetcher",
     "ir": "src.ir_scraper",
     "transcript": "src.transcript_fetcher",
+    "china": "src.china_sources",
     "table": "src.table_extractor",
     "excel": "src.excel_writer",
     "packager": "src.download_packager",
@@ -111,19 +113,23 @@ def collect_filings(
     modules: dict[str, Any],
     company: dict[str, Any],
     kinds: list[str],
-    year: str,
+    years: list[str] | str,
     enhanced_download: bool,
     claude_api_key: str,
+    quarters: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     results: list[dict[str, Any]] = []
     sec = modules.get("sec")
     ir = modules.get("ir")
     transcript = modules.get("transcript")
+    china = modules.get("china")
     utils = modules.get("utils")
+    selected_years = [years] if isinstance(years, str) and years else list(years or [])
+    sec_year = selected_years[0] if len(selected_years) == 1 else ""
     sec_kinds = [kind for kind in kinds if kind in {"annual", "quarterly", "prospectus", "presentation", "proxy"}]
     if sec and company.get("cik") and sec_kinds:
         try:
-            results.extend(sec.fetch_sec_filings(company["cik"], kinds=sec_kinds, year=year, limit=50, include_exhibits=("presentation" in kinds)))
+            results.extend(sec.fetch_sec_filings(company["cik"], kinds=sec_kinds, year=sec_year, limit=50, include_exhibits=("presentation" in kinds)))
         except Exception:
             pass
 
@@ -132,6 +138,12 @@ def collect_filings(
     if ir and any(kind in kinds for kind in ["annual", "quarterly", "presentation"]):
         try:
             results.extend(ir.find_ir_documents(company, kinds=kinds, claude_api_key=claude_api_key, max_results=12))
+        except Exception:
+            pass
+
+    if china and any(kind in kinds for kind in ["annual", "quarterly", "transcript", "presentation"]):
+        try:
+            results.extend(china.find_china_research_links(company, kinds=kinds, years=selected_years, quarters=quarters or [], max_results=24))
         except Exception:
             pass
 
@@ -175,7 +187,24 @@ def collect_filings(
         ]
         existing = {item.get("url") for item in results}
         results.extend(item for item in fallback if item.get("url") not in existing)
-    return results
+    return filter_results_by_years(results, selected_years)
+
+
+def filter_results_by_years(items: list[dict[str, Any]], years: list[str]) -> list[dict[str, Any]]:
+    if not years:
+        return items
+    selected = set(years)
+    filtered: list[dict[str, Any]] = []
+    flexible_sources = {"搜索建议", "微信公众号搜索"}
+    for item in items:
+        source = str(item.get("source", ""))
+        if source in flexible_sources:
+            filtered.append(item)
+            continue
+        text = " ".join(str(item.get(field, "")) for field in ["date", "title", "url"])
+        if any(year in text for year in selected):
+            filtered.append(item)
+    return filtered or items
 
 
 def create_zip_package(modules: dict[str, Any], company: dict[str, Any], items: list[dict[str, Any]], claude_api_key: str = "") -> tuple[str, dict[str, Any]]:
@@ -236,7 +265,7 @@ def render_sidebar(module_errors: dict[str, str]) -> str:
         )
         st.divider()
         st.subheader("数据来源")
-        st.caption("SEC EDGAR、港交所披露易、公司 IR 官网、公开网页搜索与用户上传 PDF。")
+        st.caption("SEC EDGAR、港交所披露易、公司 IR 官网、微信公众号 / 中文投研网页搜索、公开网页搜索。")
         st.caption("仅供学习研究，请遵守各数据源使用条款。")
         st.subheader("已知限制")
         st.caption("A 股、部分港股与欧洲公司可能只能提供官方平台跳转。扫描版 PDF 无法直接提取表格。")
@@ -294,21 +323,41 @@ def render_company_detail(modules: dict[str, Any], claude_api_key: str) -> None:
             checked = st.checkbox(label, value=all_kinds_selected or kind in default_kinds, key=f"kind_{kind}")
             if checked:
                 kinds.append(kind)
-    col_year, col_quarter, col_enhanced = st.columns([1, 1, 2])
-    with col_year:
-        year_choice = st.selectbox("报告年份", ["最新（不限年份）", "2026", "2025", "2024", "2023", "2022", "2021", "2020"], index=0)
-    with col_quarter:
-        st.selectbox("季度", ["全年 / 不限", "Q1", "Q2", "Q3", "Q4"], index=0)
-    with col_enhanced:
-        enhanced_download = st.checkbox("使用增强下载（Transcript & Presentation 存入本地 downloads/）", value=False)
+    current_year = datetime.now().year
+    year_options = [str(year) for year in range(current_year, current_year - 20, -1)]
+    with st.expander("报告年份", expanded=True):
+        year_select_all = st.checkbox("年份全选", value=False, key="year_select_all")
+        year_cols = st.columns(5)
+        selected_years: list[str] = []
+        for index, year in enumerate(year_options):
+            with year_cols[index % 5]:
+                checked = st.checkbox(year, value=year_select_all or index < 3, key=f"year_{year}")
+                if checked:
+                    selected_years.append(year)
+    with st.expander("季度", expanded=False):
+        quarter_select_all = st.checkbox("季度全选", value=True, key="quarter_select_all")
+        quarter_options = ["全年", "Q1", "Q2", "Q3", "Q4"]
+        quarter_cols = st.columns(5)
+        selected_quarters: list[str] = []
+        for index, quarter in enumerate(quarter_options):
+            with quarter_cols[index]:
+                checked = st.checkbox(quarter, value=quarter_select_all or quarter == "全年", key=f"quarter_{quarter}")
+                if checked:
+                    selected_quarters.append(quarter)
+    enhanced_download = st.checkbox("使用增强下载（Transcript & Presentation 存入本地 downloads/）", value=False)
 
     if st.button("🔍 获取文件列表", type="primary", use_container_width=True):
         if not kinds:
             st.warning("请至少选择一种文件类型。")
             return
-        year = "" if year_choice.startswith("最新") else year_choice
+        if not selected_years:
+            st.warning("请至少选择一个年份。")
+            return
+        if not selected_quarters:
+            st.warning("请至少选择一个季度。")
+            return
         with st.spinner("正在从 SEC、港交所、IR 官网与搜索兜底收集文件…"):
-            st.session_state.filing_results = collect_filings(modules, company, kinds, year, enhanced_download, claude_api_key)
+            st.session_state.filing_results = collect_filings(modules, company, kinds, selected_years, enhanced_download, claude_api_key, selected_quarters)
 
     if st.session_state.filing_results:
         st.subheader("文件清单")

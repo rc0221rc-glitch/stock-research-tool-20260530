@@ -315,6 +315,8 @@ def _duckduckgo_pdf_search(query: str, kind: str = "presentation", max_results: 
         title = link.get_text(" ", strip=True)
         if not real_url:
             continue
+        if "duckduckgo.com/y.js" in real_url.casefold() or "ad_domain=" in real_url.casefold():
+            continue
         host = urlparse(real_url).netloc.casefold()
         if kind == "presentation" and any(blocked in host for blocked in ["myapplestock", "wallstreetzen", "macrotrends", "companiesmarketcap"]):
             continue
