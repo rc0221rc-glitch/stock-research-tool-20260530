@@ -7,6 +7,7 @@
 - 全球公司模糊搜索：内置美股、港股、A 股、台股、韩股、日股、欧洲知名公司样本，并可用 SEC 全量公司列表搜索美股。
 - 公开文件发现：支持 SEC EDGAR、港交所披露易、公司 IR 官网、网页搜索兜底。
 - 中国公司增强来源：对 A 股、港股和中概股增加微信公众号 / Sogou 微信、雪球、东方财富、华尔街见闻、CNINFO 等中文投研与公告搜索入口。
+- Transcript / Presentation 平台深搜：额外覆盖 Seeking Alpha、Motley Fool、Stock Analysis、MarketScreener、AlphaSpread、GuruFocus、MarketBeat、Investing.com、AlphaStreet、Q4、PR Newswire、BusinessWire、GlobeNewswire、Quartr、TIKR、Koyfin、BamSEC 等公开页面或搜索入口。
 - 文件类型筛选：年度报告、季度 / 中期报告、招股说明书、Transcript、Presentation、Proxy。
 - 自动表格提取：下载文件打包时会同步从文字版 PDF / HTML 中提取表格，并用 `openpyxl` 生成每表一个 Sheet 的 Excel。
 - 可选 Claude 增强：输入 Anthropic API Key 后，可用于 Sheet 智能命名和自动发现失败时的兜底建议。
@@ -51,12 +52,13 @@ streamlit run app.py
 - 港交所披露易：通过公开 handler 接口尝试获取年报、中报与招股书。
 - 公司 IR 官网：抓取官方投资者关系页面中的 PDF、报告和演示材料链接。
 - 中文投研来源：对中国公司生成并抓取业绩会纪要、电话会纪要、交流纪要、微信公众号文章、雪球讨论和中文公告搜索结果。
-- Transcript / Presentation：通过 Motley Fool、Stock Analysis、DuckDuckGo 网页搜索和可选 Claude 兜底发现。
+- Transcript / Presentation：通过 Motley Fool、Stock Analysis、MarketScreener、AlphaSpread、Seeking Alpha、Q4/Notified/EQS/Investis 等 IR 托管和资讯平台，以及 Quartr、TIKR、Koyfin、BamSEC 等平台入口发现。
 
 ## 已知限制
 
 - A 股、部分港股、欧洲与亚洲本地市场没有统一开放 API，工具会优先提供官方平台或 Google PDF 搜索兜底。
 - Transcript 和 Presentation 自动发现依赖第三方页面结构，可能随网站变化而失效。
+- 部分平台入口可能需要登录、订阅或地区访问权限；工具会保留搜索入口，但不绕过权限限制。
 - 表格提取仅支持文字版 PDF；扫描件或图片型 PDF 需要先 OCR。
 - 请遵守 SEC、HKEX、IR 托管平台和第三方网页的使用条款。本工具仅供学习研究使用。
 

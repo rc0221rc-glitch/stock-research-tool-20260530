@@ -20,6 +20,7 @@ MODULE_NAMES = {
     "ir": "src.ir_scraper",
     "transcript": "src.transcript_fetcher",
     "china": "src.china_sources",
+    "platforms": "src.platform_discovery",
     "table": "src.table_extractor",
     "excel": "src.excel_writer",
     "packager": "src.download_packager",
@@ -123,6 +124,7 @@ def collect_filings(
     ir = modules.get("ir")
     transcript = modules.get("transcript")
     china = modules.get("china")
+    platforms = modules.get("platforms")
     utils = modules.get("utils")
     selected_years = [years] if isinstance(years, str) and years else list(years or [])
     sec_year = selected_years[0] if len(selected_years) == 1 else ""
@@ -144,6 +146,12 @@ def collect_filings(
     if china and any(kind in kinds for kind in ["annual", "quarterly", "transcript", "presentation"]):
         try:
             results.extend(china.find_china_research_links(company, kinds=kinds, years=selected_years, quarters=quarters or [], max_results=24))
+        except Exception:
+            pass
+
+    if platforms and any(kind in kinds for kind in ["transcript", "presentation"]):
+        try:
+            results.extend(platforms.discover_platform_links(company, kinds=kinds, years=selected_years, quarters=quarters or [], max_results=28))
         except Exception:
             pass
 
@@ -195,10 +203,10 @@ def filter_results_by_years(items: list[dict[str, Any]], years: list[str]) -> li
         return items
     selected = set(years)
     filtered: list[dict[str, Any]] = []
-    flexible_sources = {"搜索建议", "微信公众号搜索"}
+    strict_sources = {"SEC EDGAR", "SEC EDGAR 附件", "港交所披露易", "IR 官网", "IR 官网 Presentation", "IR (Q4 Events)"}
     for item in items:
         source = str(item.get("source", ""))
-        if source in flexible_sources:
+        if source not in strict_sources:
             filtered.append(item)
             continue
         text = " ".join(str(item.get(field, "")) for field in ["date", "title", "url"])
@@ -265,7 +273,7 @@ def render_sidebar(module_errors: dict[str, str]) -> str:
         )
         st.divider()
         st.subheader("数据来源")
-        st.caption("SEC EDGAR、港交所披露易、公司 IR 官网、微信公众号 / 中文投研网页搜索、公开网页搜索。")
+        st.caption("SEC EDGAR、港交所披露易、公司 IR 官网、微信公众号 / 中文投研网页搜索、Transcript / Presentation 平台深搜。")
         st.caption("仅供学习研究，请遵守各数据源使用条款。")
         st.subheader("已知限制")
         st.caption("A 股、部分港股与欧洲公司可能只能提供官方平台跳转。扫描版 PDF 无法直接提取表格。")
