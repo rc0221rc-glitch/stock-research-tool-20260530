@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import io
+import warnings
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, BinaryIO
 
 
@@ -57,6 +59,40 @@ def extract_tables_from_pdf(file_obj: BinaryIO | bytes, min_rows: int = 2) -> li
                 if len(rows) < min_rows or _is_noise(rows):
                     continue
                 tables.append(ExtractedTable(page=page_number, index=table_index, rows=rows, title=f"P{page_number}_{table_index}"))
+    return tables
+
+
+def extract_tables_from_html(html_text: str, source_name: str = "HTML", min_rows: int = 2) -> list[ExtractedTable]:
+    from bs4 import BeautifulSoup, XMLParsedAsHTMLWarning
+
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
+        soup = BeautifulSoup(html_text, "lxml")
+    tables: list[ExtractedTable] = []
+    for table_index, table in enumerate(soup.find_all("table"), start=1):
+        rows: list[list[str]] = []
+        for tr in table.find_all("tr"):
+            cells = [cell.get_text(" ", strip=True) for cell in tr.find_all(["th", "td"])]
+            if any(cells):
+                rows.append(cells)
+        normalized = _normalize_table(rows)
+        if len(normalized) < min_rows or _is_noise(normalized):
+            continue
+        tables.append(ExtractedTable(page=1, index=table_index, rows=normalized, title=f"{source_name}_{table_index}"))
+    return tables
+
+
+def extract_tables_from_path(path: str | Path, min_rows: int = 2) -> list[ExtractedTable]:
+    file_path = Path(path)
+    suffix = file_path.suffix.lower()
+    if suffix == ".pdf":
+        tables = extract_tables_from_pdf(file_path.read_bytes(), min_rows=min_rows)
+    elif suffix in {".htm", ".html", ".xhtml"}:
+        tables = extract_tables_from_html(file_path.read_text(encoding="utf-8", errors="ignore"), file_path.stem, min_rows=min_rows)
+    else:
+        return []
+    for table in tables:
+        table.title = f"{file_path.stem}_{table.title or f'T{table.index}'}"
     return tables
 
 

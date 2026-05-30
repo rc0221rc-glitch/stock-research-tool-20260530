@@ -178,10 +178,12 @@ def collect_filings(
     return results
 
 
-def create_zip_package(modules: dict[str, Any], company: dict[str, Any], items: list[dict[str, Any]]) -> tuple[str, dict[str, Any]]:
+def create_zip_package(modules: dict[str, Any], company: dict[str, Any], items: list[dict[str, Any]], claude_api_key: str = "") -> tuple[str, dict[str, Any]]:
     packager = modules.get("packager")
     transcript = modules.get("transcript")
     ir = modules.get("ir")
+    table = modules.get("table")
+    excel = modules.get("excel")
     if not packager:
         return "", {"error": "打包模块未加载"}
     ticker = company.get("ticker") or company.get("local_code") or "company"
@@ -204,12 +206,22 @@ def create_zip_package(modules: dict[str, Any], company: dict[str, Any], items: 
         except Exception:
             pass
     general_items = [item for item in items if item not in transcript_items and item not in presentation_items]
-    zip_path, downloaded = packager.package_downloads(general_items, root, f"{safe_ticker}_documents", extra_files=extra_files)
+    zip_path, downloaded = packager.package_downloads(
+        general_items,
+        root,
+        f"{safe_ticker}_documents",
+        extra_files=extra_files,
+        table_module=table,
+        excel_module=excel,
+        claude_api_key=claude_api_key,
+    )
+    excel_files = list((root / "Excel").glob("*.xlsx")) if (root / "Excel").exists() else []
     summary = {
         "downloaded": len(downloaded),
         "extra": len(extra_files),
         "total": len(downloaded) + len(extra_files),
         "links": len(items),
+        "excel": len(excel_files),
     }
     return str(zip_path), summary
 
@@ -238,15 +250,13 @@ def render_sidebar(module_errors: dict[str, str]) -> str:
 
 def render_search(modules: dict[str, Any]) -> None:
     st.header("公司搜索")
-    col_input, col_button = st.columns([5, 1])
-    with col_input:
+    with st.form("company_search_form", clear_on_submit=False):
         query = st.text_input(
             "输入公司简称、中文名、英文名或证券代码",
             placeholder="TSMC、台积电、2330、Apple、AAPL、Infineon、腾讯、0700…",
             label_visibility="collapsed",
         )
-    with col_button:
-        search_clicked = st.button("搜索", type="primary", use_container_width=True)
+        search_clicked = st.form_submit_button("搜索", type="primary", use_container_width=True)
     if search_clicked and query.strip():
         search_module = modules.get("company_search")
         if not search_module:
@@ -274,10 +284,16 @@ def render_company_detail(modules: dict[str, Any], claude_api_key: str) -> None:
         f"{company.get('exchange','')} · CIK: {company.get('cik') or '无'}"
     )
     labels = get_kind_labels()
-    default_labels = ["年度报告"]
-    selected_labels = st.multiselect("文件类型", list(labels.values()), default=default_labels)
-    reverse_labels = {label: key for key, label in labels.items()}
-    kinds = [reverse_labels[label] for label in selected_labels]
+    st.markdown("**文件类型**")
+    all_kinds_selected = st.checkbox("全选", value=False, key="kind_select_all")
+    default_kinds = {"annual"}
+    kinds: list[str] = []
+    cols = st.columns(2)
+    for index, (kind, label) in enumerate(labels.items()):
+        with cols[index % 2]:
+            checked = st.checkbox(label, value=all_kinds_selected or kind in default_kinds, key=f"kind_{kind}")
+            if checked:
+                kinds.append(kind)
     col_year, col_quarter, col_enhanced = st.columns([1, 1, 2])
     with col_year:
         year_choice = st.selectbox("报告年份", ["最新（不限年份）", "2026", "2025", "2024", "2023", "2022", "2021", "2020"], index=0)
@@ -287,6 +303,9 @@ def render_company_detail(modules: dict[str, Any], claude_api_key: str) -> None:
         enhanced_download = st.checkbox("使用增强下载（Transcript & Presentation 存入本地 downloads/）", value=False)
 
     if st.button("🔍 获取文件列表", type="primary", use_container_width=True):
+        if not kinds:
+            st.warning("请至少选择一种文件类型。")
+            return
         year = "" if year_choice.startswith("最新") else year_choice
         with st.spinner("正在从 SEC、港交所、IR 官网与搜索兜底收集文件…"):
             st.session_state.filing_results = collect_filings(modules, company, kinds, year, enhanced_download, claude_api_key)
@@ -301,16 +320,16 @@ def render_company_detail(modules: dict[str, Any], claude_api_key: str) -> None:
         st.divider()
         col_pack, col_download = st.columns([1, 1])
         with col_pack:
-            if st.button("📦 下载并打包全部可下载文件", type="primary", use_container_width=True):
-                with st.spinner("正在下载直链文件、保存 transcript / presentation，并生成 ZIP…"):
-                    path, summary = create_zip_package(modules, company, st.session_state.filing_results)
+            if st.button("📦 下载文件、提取表格并打包 ZIP", type="primary", use_container_width=True):
+                with st.spinner("正在下载文件、提取表格、生成 Excel，并打包 ZIP…"):
+                    path, summary = create_zip_package(modules, company, st.session_state.filing_results, claude_api_key)
                     st.session_state.package_path = path
                     st.session_state.package_summary = summary
         with col_download:
             package_path = Path(st.session_state.package_path) if st.session_state.package_path else None
             if package_path and package_path.exists():
                 summary = st.session_state.package_summary or {}
-                st.success(f"已打包 {summary.get('total', 0)} 个文件，并附带 {summary.get('links', 0)} 条链接清单")
+                st.success(f"已打包 {summary.get('total', 0)} 个文件、{summary.get('excel', 0)} 个 Excel，并附带 {summary.get('links', 0)} 条链接清单")
                 st.download_button(
                     "下载 ZIP 文件包",
                     data=package_path.read_bytes(),
@@ -320,49 +339,15 @@ def render_company_detail(modules: dict[str, Any], claude_api_key: str) -> None:
                 )
 
 
-def render_table_extractor(modules: dict[str, Any], claude_api_key: str) -> None:
-    st.header("PDF 表格提取")
-    st.caption("支持文字版 PDF。扫描版或图片型 PDF 通常无法提取，需要先 OCR。")
-    uploaded_files = st.file_uploader("上传一个或多个 PDF", type=["pdf"], accept_multiple_files=True)
-    if not uploaded_files:
-        return
-    table_module = modules.get("table")
-    excel_module = modules.get("excel")
-    if not table_module or not excel_module:
-        st.error("表格提取或 Excel 写出模块未加载。")
-        return
-    if st.button("📥 提取表格并生成 Excel", use_container_width=True):
-        for uploaded_file in uploaded_files:
-            with st.spinner(f"正在处理 {uploaded_file.name}…"):
-                try:
-                    tables = table_module.extract_tables_from_pdf(uploaded_file.getvalue())
-                    workbook_bytes = excel_module.tables_to_workbook_bytes(tables, claude_api_key=claude_api_key)
-                    filename = excel_module.excel_filename(uploaded_file.name)
-                    st.success(f"{uploaded_file.name}：提取到 {len(tables)} 个表格")
-                    st.download_button(
-                        "下载 Excel",
-                        data=workbook_bytes,
-                        file_name=filename,
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        key=f"download_{uploaded_file.name}",
-                    )
-                except Exception as exc:
-                    st.error(f"{uploaded_file.name} 处理失败：{exc}")
-
-
 def main() -> None:
     init_state()
     modules, module_errors = load_modules()
     claude_api_key = render_sidebar(module_errors)
     st.title("📊 全球上市公司文件下载工具")
-    st.caption("搜索公司、勾选文件类型、获取公开披露文件链接，并把文字版 PDF 表格导出为 Excel。")
+    st.caption("搜索公司、勾选文件类型、获取公开披露文件，并在打包下载时自动提取表格生成 Excel。")
 
-    tab_search, tab_tables = st.tabs(["文件下载", "PDF 表格提取"])
-    with tab_search:
-        render_search(modules)
-        render_company_detail(modules, claude_api_key)
-    with tab_tables:
-        render_table_extractor(modules, claude_api_key)
+    render_search(modules)
+    render_company_detail(modules, claude_api_key)
 
     st.divider()
     st.caption("数据来自公开披露平台与公司官网。工具仅供学习研究，请遵守 SEC、HKEX、IR 托管平台及第三方网页的使用条款。")

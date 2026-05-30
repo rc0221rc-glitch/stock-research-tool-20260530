@@ -61,6 +61,9 @@ def package_downloads(
     output_root: str | Path,
     package_name: str,
     extra_files: list[str | Path] | None = None,
+    table_module: Any = None,
+    excel_module: Any = None,
+    claude_api_key: str = "",
 ) -> tuple[Path, list[Path]]:
     output_root = Path(output_root)
     output_root.mkdir(parents=True, exist_ok=True)
@@ -76,9 +79,40 @@ def package_downloads(
         extra_path = Path(extra)
         if extra_path.exists():
             files.append(extra_path)
+    excel_path = extract_tables_to_excel(files, output_root, package_name, table_module, excel_module, claude_api_key)
+    if excel_path:
+        files.append(excel_path)
     zip_path = output_root / f"{clean_filename(package_name, 'documents')}.zip"
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as archive:
         for path in files:
             if path.exists() and path != zip_path:
                 archive.write(path, path.relative_to(output_root))
     return zip_path, downloaded
+
+
+def extract_tables_to_excel(
+    files: list[Path],
+    output_root: Path,
+    package_name: str,
+    table_module: Any = None,
+    excel_module: Any = None,
+    claude_api_key: str = "",
+) -> Path | None:
+    if not table_module or not excel_module:
+        return None
+    all_tables = []
+    for file_path in files:
+        if file_path.suffix.lower() not in {".pdf", ".htm", ".html", ".xhtml"}:
+            continue
+        try:
+            all_tables.extend(table_module.extract_tables_from_path(file_path))
+        except Exception:
+            continue
+    if not all_tables:
+        return None
+    excel_dir = output_root / "Excel"
+    excel_dir.mkdir(parents=True, exist_ok=True)
+    workbook_bytes = excel_module.tables_to_workbook_bytes(all_tables, claude_api_key=claude_api_key)
+    excel_path = excel_dir / f"{clean_filename(package_name, 'tables')}_tables.xlsx"
+    excel_path.write_bytes(workbook_bytes)
+    return excel_path
