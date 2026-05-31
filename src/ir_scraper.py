@@ -11,6 +11,7 @@ import requests
 from bs4 import BeautifulSoup
 
 from .utils import DEFAULT_HEADERS, LinkResult, clean_filename, dedupe_links, hard_timeout, request_text, run_limited, search_url
+from .web_pdf import save_html_as_pdf
 
 
 SESSION = requests.Session()
@@ -450,11 +451,16 @@ def download_presentations(items: list[dict[str, Any]], target_dir: str | Path, 
         content_type = response.headers.get("Content-Type", "")
         is_pdf = ".pdf" in url.casefold() or "pdf" in content_type.casefold()
         title = clean_filename(f"{ticker}_{item.get('source', 'IR')}_{item.get('title', 'presentation')}", "presentation")[:110]
-        path = target / f"{title}{'.pdf' if is_pdf else '.html'}"
         if is_pdf:
+            path = target / f"{title}.pdf"
             path.write_bytes(response.content)
         else:
-            path.write_text(response.text, encoding="utf-8", errors="ignore")
+            try:
+                path = target / f"{title}.pdf"
+                save_html_as_pdf(response.text, path, source_url=response.url or url, title=item.get("title", "presentation"))
+            except Exception:
+                path = target / f"{title}.html"
+                path.write_text(response.text, encoding="utf-8", errors="ignore")
         saved.append(path)
         time.sleep(0.2)
     return saved

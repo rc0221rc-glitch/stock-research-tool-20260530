@@ -3,10 +3,12 @@ from __future__ import annotations
 import zipfile
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import requests
 
 from .utils import DEFAULT_HEADERS, clean_filename, extension_from_response, html_link_manifest
+from .web_pdf import pdf_filename_for_url, save_html_as_pdf
 
 
 def _category_for_item(item: dict[str, Any]) -> str:
@@ -34,7 +36,7 @@ def _filename_for_item(item: dict[str, Any], index: int) -> str:
 
 def download_file_item(item: dict[str, Any], target_dir: Path, index: int, timeout: float = 18) -> Path | None:
     url = item.get("url", "")
-    if not url or not url.startswith("http") or not item.get("is_direct_file", True):
+    if not url or not url.startswith("http"):
         return None
     try:
         response = requests.get(url, headers=DEFAULT_HEADERS, timeout=timeout, allow_redirects=True)
@@ -43,10 +45,22 @@ def download_file_item(item: dict[str, Any], target_dir: Path, index: int, timeo
         return None
     if len(response.content) < 200:
         return None
-    extension = extension_from_response(url, response.headers.get("Content-Type", ""))
     category_dir = target_dir / _category_for_item(item)
     category_dir.mkdir(parents=True, exist_ok=True)
     filename = _filename_for_item(item, index)
+    content_type = response.headers.get("Content-Type", "")
+    is_pdf = ".pdf" in urlparse(response.url or url).path.casefold() or "pdf" in content_type.casefold()
+    is_html = "html" in content_type.casefold() or "<html" in response.text[:500].casefold()
+    if not item.get("is_direct_file", True) or is_html:
+        path = category_dir / pdf_filename_for_url(url, item.get("title") or filename, f"web_page_{index}")
+        try:
+            save_html_as_pdf(response.text, path, source_url=response.url or url, title=item.get("title") or "")
+            return path
+        except Exception:
+            path = category_dir / f"{filename}.html"
+            path.write_text(response.text, encoding="utf-8", errors="ignore")
+            return path
+    extension = ".pdf" if is_pdf else extension_from_response(url, content_type)
     path = category_dir / f"{filename}{extension}"
     counter = 2
     while path.exists():

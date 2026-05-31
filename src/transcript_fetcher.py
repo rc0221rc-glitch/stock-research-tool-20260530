@@ -11,6 +11,7 @@ import requests
 from bs4 import BeautifulSoup
 
 from .utils import DEFAULT_HEADERS, LinkResult, clean_filename, dedupe_links, hard_timeout, request_text, run_limited, search_url, url_exists
+from .web_pdf import save_html_as_pdf
 
 
 SESSION = requests.Session()
@@ -628,16 +629,20 @@ def download_transcript_items(items: list[dict[str, Any]], target_dir: str | Pat
             path.write_bytes(response.content)
             saved.append(path)
             continue
-        text = _extract_transcript_text(response.text)
-        if text and len(text) > 500:
-            path = target / f"{prefix}.txt"
-            path.write_text(
-                f"Title: {title}\nSource: {item.get('source', '')}\nURL: {url}\n{'=' * 60}\n\n{text}",
-                encoding="utf-8",
-            )
-        else:
-            path = target / f"{prefix}.html"
-            path.write_text(response.text, encoding="utf-8", errors="ignore")
+        try:
+            path = target / f"{prefix}.pdf"
+            save_html_as_pdf(response.text, path, source_url=response.url or url, title=title)
+        except Exception:
+            text = _extract_transcript_text(response.text)
+            if text and len(text) > 500:
+                path = target / f"{prefix}.txt"
+                path.write_text(
+                    f"Title: {title}\nSource: {item.get('source', '')}\nURL: {url}\n{'=' * 60}\n\n{text}",
+                    encoding="utf-8",
+                )
+            else:
+                path = target / f"{prefix}.html"
+                path.write_text(response.text, encoding="utf-8", errors="ignore")
         saved.append(path)
         time.sleep(0.2)
     return saved
