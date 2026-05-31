@@ -3,7 +3,7 @@ from __future__ import annotations
 import importlib
 from http.server import BaseHTTPRequestHandler
 
-from ._common import anthropic_key, error_response, handle_options, json_response, read_json_body, runtime_note
+from src.vercel_common import anthropic_key, error_response, handle_options, json_response, read_json_body, runtime_note
 
 
 MODULE_NAMES = {

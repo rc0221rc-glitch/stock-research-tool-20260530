@@ -3,7 +3,7 @@ from __future__ import annotations
 from http.server import BaseHTTPRequestHandler
 from urllib.parse import parse_qs, urlparse
 
-from ._common import error_response, handle_options, json_response, runtime_note
+from src.vercel_common import error_response, handle_options, json_response, runtime_note
 
 
 class handler(BaseHTTPRequestHandler):

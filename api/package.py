@@ -5,7 +5,7 @@ import tempfile
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 
-from ._common import anthropic_key, encoded_file_response, error_response, handle_options, json_response, read_json_body, runtime_note
+from src.vercel_common import anthropic_key, encoded_file_response, error_response, handle_options, json_response, read_json_body, runtime_note
 
 
 MAX_PACKAGE_ITEMS = 12
