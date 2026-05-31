@@ -53,7 +53,9 @@ def _runtime_note() -> str:
 def _serve_index() -> tuple[str, list[tuple[str, str]], bytes]:
     index_path = ROOT / "public" / "index.html"
     if not index_path.exists():
-        return _html_payload("<h1>Vercel frontend not found</h1>", "404 Not Found")
+        from src.vercel_frontend import INDEX_HTML
+
+        return _html_payload(INDEX_HTML)
     return _html_payload(index_path.read_text(encoding="utf-8"))
 
 
