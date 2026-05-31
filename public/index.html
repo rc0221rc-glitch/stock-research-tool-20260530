@@ -1,0 +1,226 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>全球上市公司文件下载工具 · Vercel 轻量版</title>
+  <style>
+    :root { color-scheme: light; --bg:#f6f8fb; --card:#fff; --text:#172033; --muted:#62708a; --blue:#2563eb; --line:#dbe3ef; }
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif; background: var(--bg); color: var(--text); }
+    header { padding: 32px 20px 16px; max-width: 1180px; margin: auto; }
+    h1 { margin: 0 0 8px; font-size: 30px; }
+    p { color: var(--muted); line-height: 1.6; }
+    main { max-width: 1180px; margin: auto; padding: 0 20px 40px; display: grid; gap: 16px; }
+    .card { background: var(--card); border: 1px solid var(--line); border-radius: 16px; padding: 18px; box-shadow: 0 10px 30px rgba(15, 23, 42, .04); }
+    .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+    input[type="text"] { flex: 1; min-width: 240px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 12px; font-size: 16px; }
+    button { border: 0; background: var(--blue); color: white; padding: 11px 16px; border-radius: 12px; cursor: pointer; font-weight: 650; }
+    button.secondary { background: #eef2ff; color: #1e40af; }
+    button:disabled { opacity: .55; cursor: not-allowed; }
+    label { display: inline-flex; gap: 6px; align-items: center; margin: 4px 12px 4px 0; color: #263248; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 10px; }
+    .company, .item { border: 1px solid var(--line); border-radius: 12px; padding: 12px; background: #fbfdff; }
+    .company strong, .item strong { display:block; margin-bottom:4px; }
+    .muted { color: var(--muted); font-size: 13px; }
+    .pill { display:inline-block; padding:2px 8px; border-radius:999px; background:#eef2ff; color:#1e40af; font-size:12px; margin:2px 4px 2px 0; }
+    .hidden { display: none; }
+    .status { white-space: pre-wrap; color: #334155; }
+    a { color: var(--blue); }
+    .warn { background:#fff7ed; border-color:#fed7aa; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>📊 全球上市公司文件下载工具 · Vercel 轻量版</h1>
+    <p>支持公司搜索、文件链接发现、小体积 ZIP 打包与网页转 PDF。完整 Streamlit 版更适合长耗时和大文件下载。</p>
+  </header>
+  <main>
+    <section class="card warn">
+      <strong>部署说明</strong>
+      <p>Vercel Serverless 不适合直接运行 Streamlit 长连接服务；此页面是为 Vercel 单独适配的轻量版。若 ZIP 过大或检索耗时过长，请使用 Streamlit Cloud 正式版。</p>
+    </section>
+
+    <section class="card">
+      <h2>1. 公司搜索</h2>
+      <div class="row">
+        <input id="query" type="text" placeholder="Intel、INTC、Siltronic、SUMCO、TSMC、Infineon、中芯国际…" />
+        <button id="searchBtn">搜索</button>
+      </div>
+      <p id="searchStatus" class="status"></p>
+      <div id="companies" class="grid"></div>
+    </section>
+
+    <section id="optionsCard" class="card hidden">
+      <h2>2. 选择文件范围</h2>
+      <p id="selectedCompany"></p>
+      <h3>文件类型</h3>
+      <div id="kindBox"></div>
+      <h3>年份</h3>
+      <div><label><input type="checkbox" id="allYears"> 全选年份</label></div>
+      <div id="yearBox"></div>
+      <h3>季度</h3>
+      <div><label><input type="checkbox" id="allQuarters" checked> 全选季度</label></div>
+      <div id="quarterBox"></div>
+      <button id="filingsBtn">获取文件列表</button>
+      <p id="filingsStatus" class="status"></p>
+    </section>
+
+    <section id="resultsCard" class="card hidden">
+      <h2>3. 文件清单与打包</h2>
+      <p class="muted">默认勾选前 8 条可下载/网页链接；Vercel 轻量版建议每次打包不超过 12 条。</p>
+      <div class="row">
+        <button id="selectFirstBtn" class="secondary">勾选前 8 条</button>
+        <button id="packageBtn">打包所选链接</button>
+      </div>
+      <p id="packageStatus" class="status"></p>
+      <div id="items"></div>
+    </section>
+  </main>
+
+  <script>
+    const kindLabels = {
+      annual: "年度报告",
+      quarterly: "季度 / 中期报告",
+      prospectus: "招股说明书",
+      transcript: "Earnings Call Transcript",
+      presentation: "Earnings Presentation / IR Deck",
+      proxy: "Proxy 代理声明",
+    };
+    let selectedCompany = null;
+    let filingItems = [];
+
+    const $ = (id) => document.getElementById(id);
+    const currentYear = new Date().getFullYear();
+
+    function initOptions() {
+      $("kindBox").innerHTML = Object.entries(kindLabels).map(([key, label]) =>
+        `<label><input type="checkbox" name="kind" value="${key}" ${key === "annual" ? "checked" : ""}> ${label}</label>`
+      ).join("");
+      $("yearBox").innerHTML = Array.from({length: 20}, (_, i) => currentYear - i).map((year, i) =>
+        `<label><input type="checkbox" name="year" value="${year}" ${i < 3 ? "checked" : ""}> ${year}</label>`
+      ).join("");
+      $("quarterBox").innerHTML = ["全年", "Q1", "Q2", "Q3", "Q4"].map(q =>
+        `<label><input type="checkbox" name="quarter" value="${q}" checked> ${q}</label>`
+      ).join("");
+    }
+
+    function checkedValues(name) {
+      return Array.from(document.querySelectorAll(`input[name="${name}"]:checked`)).map(el => el.value);
+    }
+
+    async function api(path, options = {}) {
+      const res = await fetch(path, options);
+      const data = await res.json();
+      if (!res.ok || data.error) throw new Error(data.error || `HTTP ${res.status}`);
+      return data;
+    }
+
+    function renderCompanies(results) {
+      $("companies").innerHTML = results.map((company, index) => `
+        <div class="company">
+          <strong>${company.flag || "🌐"} ${company.name || company.name_en || "-"}</strong>
+          <div class="muted">${company.name_en || ""}</div>
+          <span class="pill">${company.ticker || company.local_code || "-"}</span>
+          <span class="pill">${company.exchange || company.market || "-"}</span>
+          <span class="pill">${company.source || ""}</span>
+          <div style="margin-top:10px"><button onclick="selectCompany(${index})">选择</button></div>
+        </div>
+      `).join("");
+      window.companyResults = results;
+    }
+
+    window.selectCompany = (index) => {
+      selectedCompany = window.companyResults[index];
+      $("optionsCard").classList.remove("hidden");
+      $("resultsCard").classList.add("hidden");
+      $("selectedCompany").innerHTML = `<strong>${selectedCompany.name || selectedCompany.name_en}</strong> · ${selectedCompany.ticker || selectedCompany.local_code || ""} · ${selectedCompany.exchange || ""}`;
+    };
+
+    async function search() {
+      const query = $("query").value.trim();
+      if (!query) return;
+      $("searchStatus").textContent = "正在搜索…";
+      $("companies").innerHTML = "";
+      try {
+        const data = await api(`/api/search?q=${encodeURIComponent(query)}`);
+        $("searchStatus").textContent = data.results.length ? `找到 ${data.results.length} 个结果。` : "未找到结果。";
+        renderCompanies(data.results);
+      } catch (err) {
+        $("searchStatus").textContent = `搜索失败：${err.message}`;
+      }
+    }
+
+    async function fetchFilings() {
+      if (!selectedCompany) return;
+      $("filingsStatus").textContent = "正在获取文件列表…";
+      $("items").innerHTML = "";
+      try {
+        const data = await api("/api/filings", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({company: selectedCompany, kinds: checkedValues("kind"), years: checkedValues("year"), quarters: checkedValues("quarter")}),
+        });
+        filingItems = data.results || [];
+        $("filingsStatus").textContent = `找到 ${filingItems.length} 条。`;
+        renderItems();
+        $("resultsCard").classList.remove("hidden");
+      } catch (err) {
+        $("filingsStatus").textContent = `获取失败：${err.message}`;
+      }
+    }
+
+    function renderItems() {
+      $("items").innerHTML = filingItems.map((item, index) => `
+        <div class="item">
+          <label><input type="checkbox" name="item" value="${index}" ${index < 8 ? "checked" : ""}></label>
+          <strong><a href="${item.url}" target="_blank" rel="noopener">${item.title || item.url}</a></strong>
+          <span class="pill">${item.source || "-"}</span>
+          <span class="pill">${item.kind || item.form || "-"}</span>
+          <span class="pill">${item.date || ""}</span>
+          <div class="muted">${item.note || ""}</div>
+        </div>
+      `).join("");
+    }
+
+    async function packageSelected() {
+      const selected = checkedValues("item").map(i => filingItems[Number(i)]).filter(Boolean).slice(0, 12);
+      if (!selected.length) return;
+      $("packageStatus").textContent = "正在下载、网页转 PDF、打包 ZIP…";
+      try {
+        const data = await api("/api/package", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({company: selectedCompany, items: selected}),
+        });
+        const bytes = Uint8Array.from(atob(data.content_base64), c => c.charCodeAt(0));
+        const blob = new Blob([bytes], {type: "application/zip"});
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = data.filename || "documents.zip";
+        a.click();
+        URL.revokeObjectURL(url);
+        $("packageStatus").textContent = `已生成 ${data.filename}，下载文件 ${data.downloaded || 0} 个。`;
+      } catch (err) {
+        $("packageStatus").textContent = `打包失败：${err.message}`;
+      }
+    }
+
+    $("searchBtn").addEventListener("click", search);
+    $("query").addEventListener("keydown", e => { if (e.key === "Enter") search(); });
+    $("filingsBtn").addEventListener("click", fetchFilings);
+    $("packageBtn").addEventListener("click", packageSelected);
+    $("selectFirstBtn").addEventListener("click", () => {
+      document.querySelectorAll('input[name="item"]').forEach((el, i) => { el.checked = i < 8; });
+    });
+    $("allYears").addEventListener("change", e => {
+      document.querySelectorAll('input[name="year"]').forEach(el => { el.checked = e.target.checked; });
+    });
+    $("allQuarters").addEventListener("change", e => {
+      document.querySelectorAll('input[name="quarter"]').forEach(el => { el.checked = e.target.checked; });
+    });
+    initOptions();
+  </script>
+</body>
+</html>

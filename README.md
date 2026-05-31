@@ -49,6 +49,17 @@ streamlit run app.py
 2. 在 Streamlit Cloud 新建应用，入口文件选择 `app.py`。
 3. 如需 Claude 增强功能，可在 Streamlit Cloud 的 Secrets 中配置 Anthropic Key，也可以让用户在侧边栏临时输入。
 
+## 部署到 Vercel
+
+本项目同时包含一个 Vercel 轻量版：`public/index.html` + `api/*.py`。由于 Vercel Serverless Functions 不适合直接运行 Streamlit 长连接服务，Vercel 版提供搜索、文件清单和小体积 ZIP 打包；完整交互与大文件下载仍建议使用 Streamlit Cloud。
+
+1. 在 Vercel 新建项目并导入同一个 GitHub 仓库。
+2. Framework Preset 选择 `Other`。
+3. Root Directory 保持仓库根目录。
+4. Build Command 留空或使用默认。
+5. Output Directory 填 `public`。
+6. 如需 Claude 增强，可在 Vercel Environment Variables 中添加 `ANTHROPIC_API_KEY`。
+
 ## 数据源说明
 
 - SEC EDGAR：通过 `data.sec.gov/submissions/CIKxxxxxxxxxx.json` 获取 10-K、20-F、10-Q、6-K、S-1、F-1、424B4、DEF 14A 等文件；多选年份时逐年拉取，保证年报 / 季报官方文件优先出现。
@@ -72,8 +83,15 @@ streamlit run app.py
 
 ```text
 stock-research-tool/
+├── api/
+│   ├── search.py
+│   ├── filings.py
+│   └── package.py
+├── public/
+│   └── index.html
 ├── app.py
 ├── requirements.txt
+├── vercel.json
 ├── README.md
 └── src/
     ├── __init__.py
