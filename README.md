@@ -35,6 +35,26 @@ streamlit run app.py
 
 启动后浏览器会打开本地地址，通常是 `http://localhost:8501`。
 
+## AI 行业研究工具入口
+
+本仓库新增了独立的研究产品原型入口，不影响原来的文件下载器：
+
+```powershell
+streamlit run research_app.py
+```
+
+当前 `research_app.py` 面向 AI 产业链研究 V0.1，支持：
+
+- 输入目标公司，默认从 `NVDA` 开始。
+- 自动生成精选可比组，包括核心业务、上游供给、下游需求、基础设施 / 替代路线、私有模型公司观察组。
+- 用户可删除 / 新增可比公司。
+- 选择最近 4 / 8 / 12 个季度。
+- 复用现有 SEC、IR、Transcript、Presentation、Bing 定向搜索和中文来源模块，生成证据审计与信号草稿。
+- 在用户确认草稿后，生成投资备忘录 HTML 和交互式看板 HTML。
+- HTML 中的信号卡片、审计项和证据表支持点击打开来源抽屉，后续会继续补 PDF / 网页截图、页码跳转和表格单元格溯源。
+
+研究工具默认本地会话即可运行；如果配置 `SUPABASE_URL` 和 `SUPABASE_SERVICE_ROLE_KEY` 环境变量，会把任务、报告元数据和访问日志写入 Supabase/Postgres。V0.1 先预留微信登录、授权用户可见、访问行为记录和异步任务队列结构，后台队列与企业微信通知会在下一阶段接入。
+
 ## 使用流程
 
 1. 输入公司名或代码后按回车，或点击“搜索”，例如 `Apple`、`AAPL`、`Intel`、`INTC`、`Siltronic`、`SUMCO`、`台积电`、`2330`、`TSM`、`腾讯`、`0700`、`Infineon`。
