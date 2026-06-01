@@ -108,7 +108,21 @@ def build_financial_charts(companies: list[CompanyProfile], quarter_count: int =
                 insight=_peer_insight("gross_margin", peer_gross_margin),
             )
         )
-    return charts[:5], notes
+
+    peer_operating_margin = _latest_peer_points(all_series, "operating_margin")
+    if len(peer_operating_margin) >= 2:
+        charts.append(
+            FinancialChart(
+                chart_id="peer_latest_operating_margin",
+                title="Latest operating margin: target vs selected public comparables",
+                subtitle="Operating margin is calculated as operating income divided by revenue for the same reported period where available.",
+                chart_type="bar",
+                y_axis="%",
+                points=peer_operating_margin,
+                insight=_peer_insight("operating_margin", peer_operating_margin),
+            )
+        )
+    return charts, notes
 
 
 def fetch_company_metric_series(company: CompanyProfile, quarter_count: int = 4) -> dict[str, MetricSeries]:

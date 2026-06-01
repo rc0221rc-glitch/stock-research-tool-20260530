@@ -5,8 +5,10 @@ from datetime import datetime
 from typing import Any
 
 from .research_financials import build_financial_charts
+from .research_llm import generate_deepseek_research_signals, missing_deepseek_key_record, resolve_deepseek_api_key
 from .research_models import AuditFinding, CompanyProfile, EvidenceItem, FinancialChart, ResearchDraft, ResearchSignal, SignalScore
 from .research_universe import get_company_profile, recommend_comparable_groups
+from .research_validation import validate_research_draft
 from .utils import dedupe_links, run_limited
 
 
@@ -25,6 +27,8 @@ def collect_research_draft(
     quarter_count: int = 4,
     comparable_groups: list[Any] | None = None,
     claude_api_key: str = "",
+    deepseek_api_key: str = "",
+    require_llm: bool = False,
     include_external_search: bool = True,
     max_companies: int = 12,
 ) -> ResearchDraft:
@@ -49,9 +53,29 @@ def collect_research_draft(
     financial_charts, financial_notes = build_financial_charts(companies, quarter_count=quarter_count)
     run_notes.extend(financial_notes)
     audit_findings = audit_evidence(evidence, target, groups, financial_charts)
-    signals = build_signal_draft(evidence, target, groups, financial_charts)
+    fallback_signals = build_signal_draft(evidence, target, groups, financial_charts)
+    signals = fallback_signals
     next_fetch_plan = build_next_fetch_plan(evidence, signals, groups, financial_charts)
-    return ResearchDraft(
+    model_runs = []
+    deepseek_api_key = resolve_deepseek_api_key(deepseek_api_key)
+    if deepseek_api_key:
+        llm_signals, llm_plan, model_run = generate_deepseek_research_signals(
+            api_key=deepseek_api_key,
+            target_name=target.name,
+            quarter_count=quarter_count,
+            comparable_groups=groups,
+            evidence=evidence,
+            financial_charts=financial_charts,
+            fallback_signals=fallback_signals,
+        )
+        model_runs.append(model_run)
+        if model_run.status == "success":
+            signals = llm_signals
+            if llm_plan:
+                next_fetch_plan = llm_plan
+    elif require_llm:
+        model_runs.append(missing_deepseek_key_record())
+    draft = ResearchDraft(
         target=target,
         quarter_count=quarter_count,
         comparable_groups=groups,
@@ -61,8 +85,15 @@ def collect_research_draft(
         next_fetch_plan=next_fetch_plan,
         generated_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         financial_charts=financial_charts,
+        model_runs=model_runs,
         run_notes=run_notes,
     )
+    draft.validation_report = validate_research_draft(draft)
+    if any(run.status == "success" for run in model_runs):
+        draft.report_label = "DeepSeek 已参与分析的内测研究草稿：仍需完成截图溯源、权限、队列等最终交付验收"
+    else:
+        draft.report_label = "可内测研究草稿：未成功调用大模型，未达到专业最终交付标准"
+    return draft
 
 
 def audit_evidence(evidence: list[EvidenceItem], target: CompanyProfile, groups: list[Any], financial_charts: list[FinancialChart] | None = None) -> list[AuditFinding]:
@@ -160,7 +191,7 @@ def build_signal_draft(evidence: list[EvidenceItem], target: CompanyProfile, gro
         ResearchSignal(
             title="真实财务数据已进入图表层，但仍需 AI 继续挑选“最值得呈现”的异常维度",
             conclusion=f"本轮已基于 SEC XBRL 生成 {len(charts)} 个财务图表。它们覆盖收入、利润率/R&D 强度和可比公司横向对比；下一步应在这些真实数据上做纵向边际变化与横向背离扫描，而不是停留在证据目录。",
-            signal_type="财务数据信号",
+            signal_type="亮点：财务数据信号",
             status="evidence_backed" if charts else "data_gap",
             score=SignalScore(5, 5 if charts else 1, 4, 5, 4, 5),
             evidence_ids=official_ids[:6],

@@ -14,7 +14,8 @@ OUTPUT_DIR = Path("downloads") / "research_outputs"
 def save_memo_html(draft: ResearchDraft, output_dir: str | Path = OUTPUT_DIR) -> Path:
     output = Path(output_dir)
     output.mkdir(parents=True, exist_ok=True)
-    filename = clean_filename(f"{draft.target.ticker or draft.target.name}_investment_memo_{draft.generated_at[:10]}", "investment_memo")
+    suffix = "final" if draft.validation_report and draft.validation_report.status == "PASS_FINAL_DELIVERABLE" else "draft_not_final"
+    filename = clean_filename(f"{draft.target.ticker or draft.target.name}_investment_memo_{suffix}_{draft.generated_at[:10]}", "investment_memo")
     path = output / f"{filename}.html"
     path.write_text(render_memo_html(draft), encoding="utf-8")
     return path
@@ -23,7 +24,8 @@ def save_memo_html(draft: ResearchDraft, output_dir: str | Path = OUTPUT_DIR) ->
 def save_dashboard_html(draft: ResearchDraft, output_dir: str | Path = OUTPUT_DIR) -> Path:
     output = Path(output_dir)
     output.mkdir(parents=True, exist_ok=True)
-    filename = clean_filename(f"{draft.target.ticker or draft.target.name}_research_dashboard_{draft.generated_at[:10]}", "research_dashboard")
+    suffix = "final" if draft.validation_report and draft.validation_report.status == "PASS_FINAL_DELIVERABLE" else "draft_not_final"
+    filename = clean_filename(f"{draft.target.ticker or draft.target.name}_research_dashboard_{suffix}_{draft.generated_at[:10]}", "research_dashboard")
     path = output / f"{filename}.html"
     path.write_text(render_dashboard_html(draft), encoding="utf-8")
     return path
@@ -33,6 +35,8 @@ def render_memo_html(draft: ResearchDraft) -> str:
     content = f"""
     <main class="memo-shell">
       {_hero(draft, "投资备忘录草稿", "3–5 屏结论先行版本，正式发布前需要完成 AI 深度分析与人工证据确认。")}
+      {_validation_section(draft)}
+      {_model_runs_section(draft)}
       {_financial_charts_section(draft, compact=True)}
       <section class="section">
         <div class="section-title">
@@ -70,6 +74,8 @@ def render_dashboard_html(draft: ResearchDraft) -> str:
     content = f"""
     <main class="dashboard-shell">
       {_hero(draft, "交互式研究看板草稿", "信号卡片、证据矩阵、可比组与审计附录版本。点击信号或证据可打开右侧来源抽屉。")}
+      {_validation_section(draft)}
+      {_model_runs_section(draft)}
       <section class="grid-3">
         {_metric_tile("候选证据", str(len(draft.evidence)), "所有图表与文字结论必须绑定来源")}
         {_metric_tile("核心信号草稿", str(len(draft.signals)), "含亮点、风险和待验证假设")}
@@ -201,10 +207,83 @@ def _hero(draft: ResearchDraft, label: str, subtitle: str) -> str:
         <span>目标公司</span><strong>{_e(draft.target.ticker or draft.target.name)}</strong>
         <span>观察窗口</span><strong>最近 {draft.quarter_count} 个季度</strong>
         <span>生成时间</span><strong>{_e(draft.generated_at)}</strong>
+        <span>报告状态</span><strong>{_e(draft.report_label)}</strong>
       </div>
     </section>
     <section class="notice">
       AI-assisted research; not investment advice. 本文件是证据审计与信号草稿，不构成投资建议；强结论必须由至少三个独立可信来源或高权威来源链条支持。
+    </section>
+    """
+
+
+def _validation_section(draft: ResearchDraft) -> str:
+    report = draft.validation_report
+    if not report:
+        return """
+        <section class="section">
+          <div class="validation-box fail">
+            <p class="eyebrow">Validation</p>
+            <h2>未生成自动验收报告</h2>
+            <p>这份文件不能视作最终交付物。</p>
+          </div>
+        </section>
+        """
+    rows = []
+    for check in report.checks:
+        icon = "✅" if check.status == "pass" else "⚠️" if check.status == "warn" else "❌"
+        rows.append(
+            f"""
+            <details class="check-row {check.status}" {'open' if check.status == 'fail' else ''}>
+              <summary>{icon} {_e(check.category)} / {_e(check.check_id)}：{_e(check.requirement)}</summary>
+              <p><strong>当前：</strong>{_e(check.observed)}</p>
+              <p><strong>要求：</strong>{_e(check.required)}</p>
+              <p><strong>修复：</strong>{_e(check.remediation or '已满足')}</p>
+            </details>
+            """
+        )
+    return f"""
+    <section class="section">
+      <div class="validation-box {'pass' if report.status == 'PASS_FINAL_DELIVERABLE' else 'fail'}">
+        <p class="eyebrow">Automatic Acceptance Checklist</p>
+        <h2>{'达到最终交付标准' if report.status == 'PASS_FINAL_DELIVERABLE' else '未达到最终交付标准'}</h2>
+        <p>{_e(draft.report_label)}</p>
+        <div class="validation-metrics">
+          <span>通过 {report.passed}</span>
+          <span>失败 {report.failed}</span>
+          <span>警告 {report.warning}</span>
+        </div>
+        <div class="check-list">{''.join(rows)}</div>
+      </div>
+    </section>
+    """
+
+
+def _model_runs_section(draft: ResearchDraft) -> str:
+    if not draft.model_runs:
+        rows = "<tr><td colspan='7'>没有模型调用记录；本报告不能证明调用过大模型。</td></tr>"
+    else:
+        rows = "".join(
+            f"""
+            <tr>
+              <td>{_e(run.provider)}</td>
+              <td>{_e(run.model)}</td>
+              <td>{_e(run.status)}</td>
+              <td>{run.duration_seconds:.1f}s</td>
+              <td>{_e(run.purpose)}</td>
+              <td>{_e(run.output_summary)}</td>
+              <td>{_e(run.error)}</td>
+            </tr>
+            """
+            for run in draft.model_runs
+        )
+    return f"""
+    <section class="section">
+      <div class="table-wrap">
+        <table class="model-table">
+          <thead><tr><th>Provider</th><th>Model</th><th>Status</th><th>Duration</th><th>Purpose</th><th>Output</th><th>Error</th></tr></thead>
+          <tbody>{rows}</tbody>
+        </table>
+      </div>
     </section>
     """
 
@@ -492,10 +571,11 @@ def _style() -> str:
     *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",Arial,sans-serif;line-height:1.55}
     .memo-shell,.dashboard-shell{max-width:1180px;margin:0 auto;padding:28px 18px 64px}.hero{display:grid;grid-template-columns:1fr 280px;gap:24px;align-items:stretch;margin-top:10px}
     .hero h1{font-size:clamp(30px,5vw,56px);line-height:1.05;margin:8px 0 14px;letter-spacing:-.04em}.hero-subtitle{font-size:18px;color:var(--muted);max-width:760px}
-    .eyebrow{margin:0;color:var(--blue);font-size:12px;text-transform:uppercase;letter-spacing:.16em;font-weight:800}.hero-card,.metric,.signal-card,.group-card,.audit,.notice,.chart-card,.empty-state{background:rgba(255,255,255,.88);border:1px solid var(--line);border-radius:24px;box-shadow:var(--shadow)}
+    .eyebrow{margin:0;color:var(--blue);font-size:12px;text-transform:uppercase;letter-spacing:.16em;font-weight:800}.hero-card,.metric,.signal-card,.group-card,.audit,.notice,.chart-card,.empty-state,.validation-box{background:rgba(255,255,255,.88);border:1px solid var(--line);border-radius:24px;box-shadow:var(--shadow)}
     .hero-card{padding:22px;display:grid;gap:5px}.hero-card span{font-size:12px;color:var(--muted)}.hero-card strong{font-size:18px;margin-bottom:10px}.notice{margin:24px 0;padding:14px 18px;color:#42526b}
     .section{margin-top:30px}.section-title{display:flex;justify-content:space-between;align-items:end;gap:20px}.section h2,.section-title h2{font-size:26px;margin:4px 0 14px}.grid-3{display:grid;grid-template-columns:repeat(3,1fr);gap:18px;margin:24px 0}
     .metric{padding:20px}.metric span{color:var(--muted)}.metric strong{display:block;font-size:42px;line-height:1;margin:10px 0}.metric p{margin:0;color:var(--muted)}
+    .validation-box{padding:20px;border-left:8px solid var(--red)}.validation-box.pass{border-left-color:var(--green)}.validation-box h2{margin:6px 0}.validation-metrics{display:flex;gap:10px;flex-wrap:wrap;margin:12px 0}.validation-metrics span{background:#f2f6fb;border-radius:999px;padding:7px 11px;font-weight:800}.check-list{display:grid;gap:8px}.check-row{background:#f8fafc;border-radius:14px;padding:10px 12px;border:1px solid var(--line)}.check-row.fail{border-color:#fecaca;background:#fff7f7}.check-row.pass{border-color:#bbf7d0;background:#f4fff8}.check-row p{margin:6px 0;color:#42526b}
     .signal-list{display:grid;gap:16px}.signal-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px}.signal-card{padding:20px;cursor:pointer;transition:.18s transform,.18s box-shadow}.signal-card:hover{transform:translateY(-2px);box-shadow:0 22px 55px rgba(16,32,51,.13)}
     .signal-top{display:flex;justify-content:space-between;gap:12px;align-items:center}.badge,.status,.pill-row span{display:inline-flex;border-radius:999px;padding:5px 10px;font-size:12px;font-weight:700;background:#edf3ff;color:#2442a8}.status{background:#eefaf5;color:var(--green)}.needs_validation .status{background:#fff7ed;color:var(--orange)}.data_gap .status{background:#fff1f0;color:var(--red)}
     .signal-card h3{font-size:20px;margin:14px 0 8px}.signal-card p{color:#42526b}.chart-hint{border-left:4px solid var(--cyan);padding:10px 12px;background:#f0fbff;border-radius:12px;margin:14px 0}.chart-hint strong{display:block}.chart-hint span{color:var(--muted);font-size:13px}

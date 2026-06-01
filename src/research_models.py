@@ -178,6 +178,56 @@ class FinancialChart:
 
 
 @dataclass
+class ModelRunRecord:
+    provider: str
+    model: str
+    purpose: str
+    status: str
+    started_at: str = ""
+    completed_at: str = ""
+    duration_seconds: float = 0.0
+    prompt_summary: str = ""
+    output_summary: str = ""
+    error: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class ValidationCheck:
+    check_id: str
+    category: str
+    requirement: str
+    status: str
+    observed: str
+    required: str
+    severity: str = "must"
+    remediation: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class ValidationReport:
+    status: str
+    passed: int
+    failed: int
+    warning: int
+    checks: list[ValidationCheck] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "status": self.status,
+            "passed": self.passed,
+            "failed": self.failed,
+            "warning": self.warning,
+            "checks": [check.to_dict() for check in self.checks],
+        }
+
+
+@dataclass
 class ResearchDraft:
     target: CompanyProfile
     quarter_count: int
@@ -188,6 +238,9 @@ class ResearchDraft:
     next_fetch_plan: list[str]
     generated_at: str
     financial_charts: list[FinancialChart] = field(default_factory=list)
+    model_runs: list[ModelRunRecord] = field(default_factory=list)
+    validation_report: ValidationReport | None = None
+    report_label: str = "原型草稿：未完成专业深度研究"
     run_notes: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
@@ -201,5 +254,8 @@ class ResearchDraft:
             "next_fetch_plan": self.next_fetch_plan,
             "generated_at": self.generated_at,
             "financial_charts": [chart.to_dict() for chart in self.financial_charts],
+            "model_runs": [run.to_dict() for run in self.model_runs],
+            "validation_report": self.validation_report.to_dict() if self.validation_report else None,
+            "report_label": self.report_label,
             "run_notes": self.run_notes,
         }

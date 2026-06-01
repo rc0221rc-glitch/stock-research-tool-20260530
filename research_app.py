@@ -6,6 +6,7 @@ from typing import Any
 import streamlit as st
 
 from src.research_html import save_dashboard_html, save_memo_html
+from src.research_llm import deepseek_key_status
 from src.research_pipeline import collect_research_draft
 from src.research_storage import (
     create_research_job,
@@ -14,6 +15,7 @@ from src.research_storage import (
     store_report_metadata,
     suggested_supabase_schema,
 )
+from src.research_validation import checklist_markdown
 from src.research_universe import build_selected_groups, get_company_profile, recommend_comparable_groups
 
 
@@ -31,10 +33,17 @@ def init_state() -> None:
     st.session_state.setdefault("dashboard_path", "")
 
 
-def render_sidebar() -> tuple[str, str]:
+def render_sidebar() -> tuple[str, str, str]:
     with st.sidebar:
         st.header("内测设置")
         user_id = st.text_input("当前用户 ID", value="admin", help="V0.1 先用文本 ID；后续接 WeChat 登录后会替换为真实用户。")
+        deepseek_api_key = st.text_input("DeepSeek API Key", value="", type="password", help="用于真正调用大模型生成/改写研究信号；不会写入仓库。")
+        key_status = deepseek_key_status(deepseek_api_key)
+        if any(key_status.values()):
+            source = "页面输入" if key_status["ui"] else "进程环境变量" if key_status["process_env"] else "本地 .env"
+            st.success(f"DeepSeek Key 已可用（来源：{source}）。")
+        else:
+            st.error("DeepSeek Key 不可用：请在这里输入，或在未提交的 `.env` 写入 DEEPSEEK_API_KEY。")
         claude_api_key = st.text_input("Anthropic API Key（可选）", value="", type="password", help="当前仅传给已有下载器兜底逻辑；正式多模型研究层后续接入。")
         st.divider()
         st.subheader("权限与数据库")
@@ -45,7 +54,7 @@ def render_sidebar() -> tuple[str, str]:
         with st.expander("Supabase 表结构建议"):
             st.code(suggested_supabase_schema(), language="sql")
         st.caption("V0.1 已预留任务、报告权限和访问日志结构；真正的后台队列与微信通知会在下一阶段接入。")
-    return user_id.strip() or "anonymous", claude_api_key.strip()
+    return user_id.strip() or "anonymous", claude_api_key.strip(), deepseek_api_key.strip()
 
 
 def render_target_form() -> None:
@@ -112,9 +121,10 @@ def render_comparable_editor() -> list[Any]:
     return selected_groups
 
 
-def render_task_runner(user_id: str, claude_api_key: str, selected_groups: list[Any]) -> None:
+def render_task_runner(user_id: str, claude_api_key: str, deepseek_api_key: str, selected_groups: list[Any]) -> None:
     st.subheader("3. 提交任务 → 进度 → 证据审计与信号草稿")
     include_external_search = st.checkbox("启用外部公开信息搜索（媒体、平台、私有玩家线索）", value=True)
+    require_llm = st.checkbox("必须调用 DeepSeek 大模型完成信号分析", value=True)
     max_companies = st.slider("本轮最多抓取研究对象数", min_value=4, max_value=20, value=12, help="原型阶段建议先控制数量，避免单次运行过慢。")
     if st.button("生成证据审计和信号草稿", type="primary", use_container_width=True):
         job = create_research_job(
@@ -136,14 +146,19 @@ def render_task_runner(user_id: str, claude_api_key: str, selected_groups: list[
                     quarter_count=st.session_state.quarter_count,
                     comparable_groups=selected_groups,
                     claude_api_key=claude_api_key,
+                    deepseek_api_key=deepseek_api_key,
+                    require_llm=require_llm,
                     include_external_search=include_external_search,
                     max_companies=max_companies,
                 )
-            progress.progress(78, text="生成证据审计与信号草稿")
+            progress.progress(88, text="生成证据审计、模型记录与自动验收清单")
             st.session_state.research_draft = draft
             log_research_event(user_id, "research_draft_ready", metadata={"job_id": job["id"], "evidence_count": len(draft.evidence)})
-            progress.progress(100, text="完成：请审阅草稿后再生成最终 HTML")
-            st.success("证据审计和信号草稿已生成。")
+            progress.progress(100, text="完成：请审阅草稿和自动验收清单")
+            if any(run.status == "success" for run in draft.model_runs):
+                st.success("DeepSeek 大模型已成功参与本轮信号分析。")
+            else:
+                st.error("DeepSeek 大模型未成功参与本轮分析；请查看自动验收清单和模型运行记录。")
         except Exception as exc:
             progress.empty()
             st.error(f"任务失败：{exc}")
@@ -155,13 +170,28 @@ def render_draft_review(user_id: str) -> None:
         return
 
     st.subheader("4. 审阅草稿")
+    st.warning(draft.report_label)
     summary_cols = st.columns(4)
     summary_cols[0].metric("候选证据", len(draft.evidence))
     summary_cols[1].metric("信号草稿", len(draft.signals))
     summary_cols[2].metric("真实财务图表", len(draft.financial_charts))
     summary_cols[3].metric("审计项", len(draft.audit_findings))
 
-    tab_charts, tab_signals, tab_audit, tab_evidence, tab_plan = st.tabs(["真实财务图表", "信号草稿", "证据审计", "候选证据", "下一步验证"])
+    tab_checklist, tab_models, tab_charts, tab_signals, tab_audit, tab_evidence, tab_plan = st.tabs(["自动验收清单", "模型运行记录", "真实财务图表", "信号草稿", "证据审计", "候选证据", "下一步验证"])
+    with tab_checklist:
+        if draft.validation_report:
+            status = draft.validation_report.status
+            st.error("未达到最终交付标准") if status != "PASS_FINAL_DELIVERABLE" else st.success("达到最终交付标准")
+            st.metric("通过项", draft.validation_report.passed)
+            st.metric("失败项", draft.validation_report.failed)
+            st.markdown(checklist_markdown(draft.validation_report))
+        else:
+            st.warning("尚未生成自动验收报告。")
+    with tab_models:
+        if not draft.model_runs:
+            st.error("没有任何模型调用记录。")
+        else:
+            st.dataframe([run.to_dict() for run in draft.model_runs], use_container_width=True, hide_index=True)
     with tab_charts:
         if not draft.financial_charts:
             st.warning("本轮没有生成真实财务图表。可能是目标公司或可比公司没有 SEC XBRL 数据，下一阶段需要接入 IR 表格 / 港股 / A股公告数据。")
@@ -214,17 +244,20 @@ def render_draft_review(user_id: str) -> None:
                     st.caption(note)
 
     st.subheader("5. 你确认后生成 HTML")
-    confirmed = st.checkbox("我已审阅证据审计和信号草稿，允许生成 HTML 交付物", value=False)
+    passed_final = bool(draft.validation_report and draft.validation_report.status == "PASS_FINAL_DELIVERABLE")
+    if not passed_final:
+        st.error("自动验收未通过：只能生成“内测草稿 HTML”，不能标记为最终交付物。")
+    confirmed = st.checkbox("我理解这只是内测草稿，不是专业最终交付物，仍要生成 HTML", value=False)
     col_memo, col_dashboard = st.columns(2)
     with col_memo:
-        if st.button("生成投资备忘录 HTML", disabled=not confirmed, use_container_width=True):
+        if st.button("生成投资备忘录草稿 HTML（非最终）", disabled=not confirmed, use_container_width=True):
             path = save_memo_html(draft)
             st.session_state.memo_path = str(path)
             report = store_report_metadata(_job_id(), user_id, "memo", str(path), draft)
             log_research_event(user_id, "memo_html_generated", report_id=report["id"], metadata={"path": str(path)})
             st.success(f"已生成：{path}")
     with col_dashboard:
-        if st.button("生成交互看板 HTML", disabled=not confirmed, use_container_width=True):
+        if st.button("生成交互看板草稿 HTML（非最终）", disabled=not confirmed, use_container_width=True):
             path = save_dashboard_html(draft)
             st.session_state.dashboard_path = str(path)
             report = store_report_metadata(_job_id(), user_id, "dashboard", str(path), draft)
@@ -255,14 +288,14 @@ def _job_id() -> str:
 
 def main() -> None:
     init_state()
-    user_id, claude_api_key = render_sidebar()
+    user_id, claude_api_key, deepseek_api_key = render_sidebar()
     st.title("🧠 AI 行业研究工具 · 独立原型入口")
     st.caption("目标：从大量公司文件、业绩会纪要、外部可信信息中筛出真正值得投资人关注的信号，并生成可追溯 HTML。")
     render_target_form()
     st.divider()
     selected_groups = render_comparable_editor()
     st.divider()
-    render_task_runner(user_id, claude_api_key, selected_groups)
+    render_task_runner(user_id, claude_api_key, deepseek_api_key, selected_groups)
     st.divider()
     render_draft_review(user_id)
     st.caption("V0.1 原型：同步执行任务并模拟任务队列。下一阶段会接入真正后台队列、微信登录/通知、权限管理和访问行为日志。")
