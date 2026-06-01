@@ -127,6 +127,57 @@ class AuditFinding:
 
 
 @dataclass
+class FinancialSource:
+    title: str
+    url: str
+    accession: str = ""
+    form: str = ""
+    filed: str = ""
+    concept: str = ""
+    unit: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class FinancialDataPoint:
+    ticker: str
+    company: str
+    metric: str
+    metric_label: str
+    period: str
+    end_date: str
+    value: float
+    display_value: str
+    unit: str
+    series: str = ""
+    sources: list[FinancialSource] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        data = asdict(self)
+        data["sources"] = [source.to_dict() for source in self.sources]
+        return data
+
+
+@dataclass
+class FinancialChart:
+    chart_id: str
+    title: str
+    subtitle: str
+    chart_type: str
+    y_axis: str
+    points: list[FinancialDataPoint] = field(default_factory=list)
+    insight: str = ""
+    source_note: str = "SEC XBRL companyfacts; each point links to the filing accession index."
+
+    def to_dict(self) -> dict[str, Any]:
+        data = asdict(self)
+        data["points"] = [point.to_dict() for point in self.points]
+        return data
+
+
+@dataclass
 class ResearchDraft:
     target: CompanyProfile
     quarter_count: int
@@ -136,6 +187,7 @@ class ResearchDraft:
     audit_findings: list[AuditFinding]
     next_fetch_plan: list[str]
     generated_at: str
+    financial_charts: list[FinancialChart] = field(default_factory=list)
     run_notes: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
@@ -148,5 +200,6 @@ class ResearchDraft:
             "audit_findings": [finding.to_dict() for finding in self.audit_findings],
             "next_fetch_plan": self.next_fetch_plan,
             "generated_at": self.generated_at,
+            "financial_charts": [chart.to_dict() for chart in self.financial_charts],
             "run_notes": self.run_notes,
         }

@@ -158,10 +158,31 @@ def render_draft_review(user_id: str) -> None:
     summary_cols = st.columns(4)
     summary_cols[0].metric("候选证据", len(draft.evidence))
     summary_cols[1].metric("信号草稿", len(draft.signals))
-    summary_cols[2].metric("审计项", len(draft.audit_findings))
-    summary_cols[3].metric("可比组", len(draft.comparable_groups))
+    summary_cols[2].metric("真实财务图表", len(draft.financial_charts))
+    summary_cols[3].metric("审计项", len(draft.audit_findings))
 
-    tab_signals, tab_audit, tab_evidence, tab_plan = st.tabs(["信号草稿", "证据审计", "候选证据", "下一步验证"])
+    tab_charts, tab_signals, tab_audit, tab_evidence, tab_plan = st.tabs(["真实财务图表", "信号草稿", "证据审计", "候选证据", "下一步验证"])
+    with tab_charts:
+        if not draft.financial_charts:
+            st.warning("本轮没有生成真实财务图表。可能是目标公司或可比公司没有 SEC XBRL 数据，下一阶段需要接入 IR 表格 / 港股 / A股公告数据。")
+        for chart in draft.financial_charts:
+            with st.container(border=True):
+                st.markdown(f"### {chart.title}")
+                st.caption(f"{chart.chart_type} · {chart.y_axis}")
+                st.write(chart.insight)
+                rows = []
+                for point in chart.points:
+                    rows.append(
+                        {
+                            "ticker": point.ticker,
+                            "period": point.period,
+                            "end_date": point.end_date,
+                            "metric": point.metric_label,
+                            "value": point.display_value,
+                            "source": point.sources[0].url if point.sources else "",
+                        }
+                    )
+                st.dataframe(rows, use_container_width=True, hide_index=True)
     with tab_signals:
         for index, signal in enumerate(draft.signals, start=1):
             with st.container(border=True):

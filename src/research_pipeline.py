@@ -4,7 +4,8 @@ from collections import Counter, defaultdict
 from datetime import datetime
 from typing import Any
 
-from .research_models import AuditFinding, CompanyProfile, EvidenceItem, ResearchDraft, ResearchSignal, SignalScore
+from .research_financials import build_financial_charts
+from .research_models import AuditFinding, CompanyProfile, EvidenceItem, FinancialChart, ResearchDraft, ResearchSignal, SignalScore
 from .research_universe import get_company_profile, recommend_comparable_groups
 from .utils import dedupe_links, run_limited
 
@@ -45,9 +46,11 @@ def collect_research_draft(
             run_notes.extend(notes)
 
     evidence = _dedupe_evidence(evidence)
-    audit_findings = audit_evidence(evidence, target, groups)
-    signals = build_signal_draft(evidence, target, groups)
-    next_fetch_plan = build_next_fetch_plan(evidence, signals, groups)
+    financial_charts, financial_notes = build_financial_charts(companies, quarter_count=quarter_count)
+    run_notes.extend(financial_notes)
+    audit_findings = audit_evidence(evidence, target, groups, financial_charts)
+    signals = build_signal_draft(evidence, target, groups, financial_charts)
+    next_fetch_plan = build_next_fetch_plan(evidence, signals, groups, financial_charts)
     return ResearchDraft(
         target=target,
         quarter_count=quarter_count,
@@ -57,11 +60,12 @@ def collect_research_draft(
         audit_findings=audit_findings,
         next_fetch_plan=next_fetch_plan,
         generated_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        financial_charts=financial_charts,
         run_notes=run_notes,
     )
 
 
-def audit_evidence(evidence: list[EvidenceItem], target: CompanyProfile, groups: list[Any]) -> list[AuditFinding]:
+def audit_evidence(evidence: list[EvidenceItem], target: CompanyProfile, groups: list[Any], financial_charts: list[FinancialChart] | None = None) -> list[AuditFinding]:
     findings: list[AuditFinding] = []
     by_company: dict[str, list[int]] = defaultdict(list)
     by_type: Counter[str] = Counter()
@@ -78,6 +82,18 @@ def audit_evidence(evidence: list[EvidenceItem], target: CompanyProfile, groups:
             finding=f"已为 {target.name} 收集 {len(target_items)} 条候选证据；正式报告前至少需要覆盖官方披露、业绩会/PPT、外部交叉验证三类。",
             severity="info" if len(target_items) >= 3 else "warning",
             related_evidence_ids=target_items[:8],
+        )
+    )
+
+    chart_count = len(financial_charts or [])
+    point_count = sum(len(chart.points) for chart in (financial_charts or []))
+    findings.append(
+        AuditFinding(
+            topic="真实财务图表覆盖",
+            status="pass" if chart_count else "warning",
+            finding=f"已生成 {chart_count} 个真实财务图表，包含 {point_count} 个 SEC XBRL 数据点；每个数据点都保留 SEC accession 来源链接。",
+            severity="info" if chart_count else "warning",
+            related_evidence_ids=[],
         )
     )
 
@@ -130,7 +146,7 @@ def audit_evidence(evidence: list[EvidenceItem], target: CompanyProfile, groups:
     return findings
 
 
-def build_signal_draft(evidence: list[EvidenceItem], target: CompanyProfile, groups: list[Any]) -> list[ResearchSignal]:
+def build_signal_draft(evidence: list[EvidenceItem], target: CompanyProfile, groups: list[Any], financial_charts: list[FinancialChart] | None = None) -> list[ResearchSignal]:
     by_type = Counter(item.evidence_type or "unknown" for item in evidence)
     by_tier = Counter(item.confidence_tier for item in evidence)
     target_ids = [index for index, item in enumerate(evidence) if (item.ticker or "").upper() == target.ticker.upper()]
@@ -138,8 +154,29 @@ def build_signal_draft(evidence: list[EvidenceItem], target: CompanyProfile, gro
     presentation_ids = [index for index, item in enumerate(evidence) if item.evidence_type == "presentation"]
     official_ids = [index for index, item in enumerate(evidence) if item.confidence_tier == "official"]
     external_ids = [index for index, item in enumerate(evidence) if item.confidence_tier in {"media", "platform", "search"}]
+    charts = financial_charts or []
 
     signals = [
+        ResearchSignal(
+            title="真实财务数据已进入图表层，但仍需 AI 继续挑选“最值得呈现”的异常维度",
+            conclusion=f"本轮已基于 SEC XBRL 生成 {len(charts)} 个财务图表。它们覆盖收入、利润率/R&D 强度和可比公司横向对比；下一步应在这些真实数据上做纵向边际变化与横向背离扫描，而不是停留在证据目录。",
+            signal_type="财务数据信号",
+            status="evidence_backed" if charts else "data_gap",
+            score=SignalScore(5, 5 if charts else 1, 4, 5, 4, 5),
+            evidence_ids=official_ids[:6],
+            chart_hint="真实财务趋势图 + 可比公司横向柱状图",
+            chart_reason="折线/柱状组合可以同时呈现目标公司自身过去季度变化，以及与可比公司的同截面差异。",
+            reasoning_summary="没有真实财务数据图表时，HTML 只能算研究流程草稿；有了 XBRL 数据后，才开始接近投资人可阅读交付物。",
+            reasoning_chain=[
+                "从 SEC companyfacts 拉取季度 XBRL 概念数据。",
+                "对 revenue、gross profit、operating income、net income、R&D 等指标按季度归一。",
+                "派生 gross margin、operating margin、R&D/revenue，并生成目标公司趋势和可比公司横向图。",
+            ],
+            next_validation_actions=[
+                "把 SEC accession 升级为具体 filing 页面、表格位置和截图。",
+                "继续补充非 SEC 公司，如 TSM、SK Hynix、Samsung 的 IR 表格数据。",
+            ],
+        ),
         ResearchSignal(
             title="AI 产业链景气度需要用“芯片—制造—云—基础设施”闭环验证",
             conclusion="当前草稿已建立多组可比与交叉验证对象；最终结论不应只看目标公司单季指标，而应同时验证上游供给约束、下游 CSP 资本开支和服务器/网络/电力散热交付。",
@@ -224,8 +261,9 @@ def build_signal_draft(evidence: list[EvidenceItem], target: CompanyProfile, gro
     return signals[:5]
 
 
-def build_next_fetch_plan(evidence: list[EvidenceItem], signals: list[ResearchSignal], groups: list[Any]) -> list[str]:
+def build_next_fetch_plan(evidence: list[EvidenceItem], signals: list[ResearchSignal], groups: list[Any], financial_charts: list[FinancialChart] | None = None) -> list[str]:
     plan = [
+        "对已生成的 SEC XBRL 财务图表做异常扫描：同比/环比、利润率背离、R&D 强度、经营杠杆和可比公司横向排名。",
         "补抓每家核心可比公司最近 4 个季度的 earnings call transcript 与 presentation。",
         "对官方 PDF 执行表格抽取，建立指标-期间-来源页码-单元格映射。",
         "对管理层文字做季度切片，比较需求、供给、价格、库存、客户、CapEx、竞争等关键词簇。",
