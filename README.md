@@ -51,14 +51,13 @@ streamlit run app.py
 
 ## 部署到 Vercel
 
-本项目同时包含一个 Vercel 轻量版：`public/index.html` + `api/*.py`。由于 Vercel Serverless Functions 不适合直接运行 Streamlit 长连接服务，Vercel 版提供搜索、文件清单和小体积 ZIP 打包；完整交互与大文件下载仍建议使用 Streamlit Cloud。
+Vercel 轻量版已隔离在 `vercel` 分支，避免 Vercel 的 `pyproject.toml` / API 入口影响 Streamlit Cloud 构建。由于 Vercel Serverless Functions 不适合直接运行 Streamlit 长连接服务，Vercel 版只提供搜索、文件清单和小体积 ZIP 打包；完整交互与大文件下载仍建议使用 Streamlit Cloud。
 
 1. 在 Vercel 新建项目并导入同一个 GitHub 仓库。
-2. Framework Preset 选择 `Other`。
-3. Root Directory 保持仓库根目录。
-4. Build Command 留空或使用默认。
-5. Output Directory 填 `public`。
-6. 如需 Claude 增强，可在 Vercel Environment Variables 中添加 `ANTHROPIC_API_KEY`。
+2. Production Branch 选择 `vercel`。
+3. Framework Preset 选择 `Other`。
+4. Root Directory 保持仓库根目录。
+5. 如需 Claude 增强，可在 Vercel Environment Variables 中添加 `ANTHROPIC_API_KEY`。
 
 ## 数据源说明
 
@@ -83,15 +82,8 @@ streamlit run app.py
 
 ```text
 stock-research-tool/
-├── api/
-│   ├── search.py
-│   ├── filings.py
-│   └── package.py
-├── public/
-│   └── index.html
 ├── app.py
 ├── requirements.txt
-├── vercel.json
 ├── README.md
 └── src/
     ├── __init__.py
