@@ -183,6 +183,7 @@ def _document(title: str, content: str, draft: ResearchDraft) -> str:
         </article>
       `).join('') : '<p class="muted">这个信号暂未绑定证据，不能升级为正式结论。</p>';
       drawer.classList.add('open');
+      drawer.dataset.openedAt = String(Date.now());
     }}
     function showFinancialPoint(chartIndex, pointIndex) {{
       const drawer = document.getElementById('evidenceDrawer');
@@ -192,6 +193,7 @@ def _document(title: str, content: str, draft: ResearchDraft) -> str:
       if (!point) {{
         body.innerHTML = '<p class="muted">未找到这个数据点的来源。</p>';
         drawer.classList.add('open');
+        drawer.dataset.openedAt = String(Date.now());
         return;
       }}
       const sources = point.sources || [];
@@ -212,10 +214,19 @@ def _document(title: str, content: str, draft: ResearchDraft) -> str:
         </article>
       `;
       drawer.classList.add('open');
+      drawer.dataset.openedAt = String(Date.now());
     }}
     function closeEvidence() {{
       document.getElementById('evidenceDrawer').classList.remove('open');
     }}
+    document.addEventListener('click', event => {{
+      const drawer = document.getElementById('evidenceDrawer');
+      if (!drawer || !drawer.classList.contains('open')) return;
+      if (drawer.contains(event.target)) return;
+      const openedAt = Number(drawer.dataset.openedAt || 0);
+      if (Date.now() - openedAt < 80) return;
+      closeEvidence();
+    }});
     function escapeHtml(value) {{
       return String(value || '').replace(/[&<>"']/g, char => ({{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}}[char]));
     }}
