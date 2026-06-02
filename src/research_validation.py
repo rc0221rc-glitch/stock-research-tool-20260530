@@ -522,10 +522,10 @@ def _check_mobile_report_shape(draft: ResearchDraft) -> ValidationCheck:
     return _check(
         "mobile_shape",
         "手机/电脑阅读",
-        "投资备忘录版本应是 3–5 屏结论先行，并可在手机和电脑流畅阅读。",
+        "投资备忘录版本不限页数，应结论先行，并可在手机和电脑流畅阅读。",
         ok,
         f"移动端截图验收 passed={bool(mobile.get('passed'))}；截图={mobile.get('screenshot_path') or '无'}。",
-        "移动端截图验收通过，首屏结论先行。",
+        "移动端截图验收通过，结论先行且布局可读。",
         "增加 Playwright/浏览器截图验收，输出移动端布局报告。",
     )
 

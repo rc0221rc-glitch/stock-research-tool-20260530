@@ -56,7 +56,7 @@ def _run_mobile_validation_if_needed(path: Path, draft: ResearchDraft) -> None:
 def render_memo_html(draft: ResearchDraft) -> str:
     content = f"""
     <main class="memo-shell">
-      {_hero(draft, "投资备忘录草稿", "3–5 屏结论先行版本，正式发布前需要完成 AI 深度分析与人工证据确认。")}
+      {_hero(draft, "投资备忘录草稿", "不限页数，结论先行；以完整呈现重要信号、图表和证据追溯为准。")}
       {_validation_section(draft)}
       {_model_runs_section(draft)}
       {_financial_charts_section(draft, compact=True)}
