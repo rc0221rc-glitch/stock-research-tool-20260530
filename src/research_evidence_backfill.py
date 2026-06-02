@@ -93,6 +93,8 @@ def _financial_source_evidence(charts: list[FinancialChart]) -> list[EvidenceIte
 def _official_seed_evidence(companies: list[CompanyProfile], years: list[str]) -> list[EvidenceItem]:
     items: list[EvidenceItem] = []
     for company in companies:
+        if _is_china_a_share(company):
+            items.extend(_cninfo_seed_evidence(company, years))
         if company.ir_url:
             items.append(
                 EvidenceItem(
@@ -126,6 +128,40 @@ def _official_seed_evidence(companies: list[CompanyProfile], years: list[str]) -
                     access_scope="public",
                 )
             )
+    return items
+
+
+def _cninfo_seed_evidence(company: CompanyProfile, years: list[str]) -> list[EvidenceItem]:
+    try:
+        from .cninfo_fetcher import fetch_cninfo_filings
+
+        raw_items = fetch_cninfo_filings(
+            company.to_company_dict(),
+            kinds=["annual", "quarterly"],
+            years=years,
+            quarters=["Q1", "Q2", "Q3", "Q4"],
+            limit=12,
+        )
+    except Exception:
+        raw_items = []
+    items = [_link_to_evidence(LinkResult(**item), company) for item in raw_items if item.get("url")]
+    code = company.local_code or "".join(ch for ch in company.ticker if ch.isdigit())
+    if code:
+        items.append(
+            EvidenceItem(
+                title=f"{company.name} 巨潮资讯官方公告入口",
+                url=f"https://www.cninfo.com.cn/new/disclosure/stock?stockCode={code}",
+                source="巨潮资讯官方公告",
+                company=company.name,
+                ticker=company.ticker,
+                evidence_type="official_filings",
+                period=", ".join(years[:3]),
+                confidence_tier="official",
+                confidence_reason="A股上市公司官方公告底线来源；年报/季报应优先从巨潮资讯定位到具体 PDF。",
+                trace_type="webpage",
+                access_scope="public",
+            )
+        )
     return items
 
 
@@ -246,6 +282,7 @@ def _dict_to_evidence(item: dict[str, Any], company: CompanyProfile) -> Evidence
 
 
 def _link_to_evidence(item: LinkResult, company: CompanyProfile) -> EvidenceItem:
+    is_official = item.source in {"SMIC IR", "HKEX", "港交所披露易", "巨潮资讯官方公告"} or "cninfo.com.cn" in item.url.casefold()
     return EvidenceItem(
         title=item.title,
         url=item.url,
@@ -254,8 +291,8 @@ def _link_to_evidence(item: LinkResult, company: CompanyProfile) -> EvidenceItem
         ticker=company.ticker,
         evidence_type=item.kind or "web",
         period=item.date or item.form,
-        confidence_tier="official" if item.source in {"SMIC IR", "HKEX", "港交所披露易"} else "search",
-        confidence_reason=item.note or "预置来源入口，需继续定位具体原文、PDF、页码或网页截图。",
+        confidence_tier="official" if is_official else "search",
+        confidence_reason=item.note or ("A股官方公告 PDF，来自巨潮资讯。" if is_official else "预置来源入口，需继续定位具体原文、PDF、页码或网页截图。"),
         trace_type="pdf" if item.is_direct_file else "webpage",
         access_scope="public",
     )
@@ -287,3 +324,10 @@ def _kind_label(kind: str) -> str:
         "transcript": "业绩会纪要",
         "presentation": "演示材料",
     }.get(kind, kind)
+
+
+def _is_china_a_share(company: CompanyProfile) -> bool:
+    text = f"{company.ticker} {company.local_code} {company.market} {company.exchange} {company.country}".casefold()
+    if "a股" in text or "szse" in text or "sse" in text or "bjse" in text:
+        return True
+    return bool(company.local_code and company.local_code.isdigit() and len(company.local_code) == 6 and "中国" in company.country)

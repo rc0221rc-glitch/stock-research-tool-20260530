@@ -2,8 +2,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date
+import io
 import re
 from typing import Any
+
+import requests
 
 from .research_models import CompanyProfile, FinancialChart, FinancialDataPoint, FinancialSource
 from .utils import request_json
@@ -27,6 +30,9 @@ METRIC_LABELS = {
     "gross_margin": "Gross Margin",
     "operating_margin": "Operating Margin",
     "rd_intensity": "R&D / Revenue",
+    "cash_from_operations": "Operating Cash Flow",
+    "inventory": "Inventory",
+    "construction_in_progress": "Construction in Progress",
 }
 
 
@@ -43,18 +49,41 @@ def build_financial_charts(companies: list[CompanyProfile], quarter_count: int =
     public_companies = [company for company in companies if company.is_public]
     for company in public_companies:
         company_series: dict[str, MetricSeries] = {}
-        if company.cik:
+        if _is_china_a_share(company):
+            if is_wind_available():
+                try:
+                    company_series = fetch_wind_metric_series(company, quarter_count=quarter_count)
+                except Exception as exc:
+                    notes.append(f"{company.ticker}: Wind 财务数据抓取失败：{_compact_wind_error(exc)}")
+            try:
+                cninfo_series = fetch_cninfo_metric_series(company, quarter_count=quarter_count)
+                company_series = _prefer_primary_series(company_series, cninfo_series)
+                if cninfo_series:
+                    notes.append(f"{company.ticker}: 已补充巨潮官方 PDF 表格数据，用于净利润、现金流、存货、在建工程等披露字段。")
+            except Exception as exc:
+                if not company_series:
+                    notes.append(f"{company.ticker}: 巨潮 PDF 财务表格提取失败：{exc}")
+            if not company_series:
+                try:
+                    company_series = fetch_cninfo_metric_series(company, quarter_count=quarter_count)
+                    if company_series:
+                        notes.append(f"{company.ticker}: Wind 不可用或无返回，已从巨潮官方 PDF 提取主要财务表格生成图表。")
+                except Exception as exc:
+                    notes.append(f"{company.ticker}: 巨潮 PDF 财务表格提取失败：{exc}")
+            if not company_series and not is_wind_available():
+                notes.append(f"{company.ticker}: 当前运行环境没有本机 Wind MCP；A股财务图表已尝试改从巨潮官方 PDF 提取。")
+        elif company.cik:
             try:
                 company_series = fetch_company_metric_series(company, quarter_count=quarter_count)
             except Exception as exc:
                 notes.append(f"{company.ticker}: SEC companyfacts 财务数据抓取失败：{exc}")
-        if _needs_wind_financials(company, company_series):
+        if not _is_china_a_share(company) and _needs_wind_financials(company, company_series):
             try:
                 wind_series = fetch_wind_metric_series(company, quarter_count=quarter_count)
                 company_series = _prefer_primary_series(company_series, wind_series)
             except Exception as exc:
                 if is_wind_available():
-                    notes.append(f"{company.ticker}: Wind 财务数据抓取失败：{exc}")
+                    notes.append(f"{company.ticker}: Wind 财务数据抓取失败：{_compact_wind_error(exc)}")
         if company_series:
             all_series[company.ticker] = company_series
 
@@ -83,6 +112,22 @@ def build_financial_charts(companies: list[CompanyProfile], quarter_count: int =
                 source_note=_source_note_for_points(revenue_points),
             )
         )
+
+    for supplemental_metric in ["net_income", "cash_from_operations", "inventory", "construction_in_progress"]:
+        points = target_series.get(supplemental_metric, MetricSeries(supplemental_metric, METRIC_LABELS.get(supplemental_metric, supplemental_metric), [])).points
+        if points:
+            charts.append(
+                FinancialChart(
+                    chart_id=f"target_{supplemental_metric}",
+                    title=f"{target.ticker} {METRIC_LABELS.get(supplemental_metric, supplemental_metric)} trend",
+                    subtitle=_source_subtitle(points, "Latest reported periods from filings / Wind fundamentals; click any point to inspect source metadata."),
+                    chart_type="line" if supplemental_metric in {"inventory", "construction_in_progress"} else "bar_line",
+                    y_axis=_axis_label(points),
+                    points=points,
+                    insight=_trend_insight(target.ticker, supplemental_metric, points),
+                    source_note=_source_note_for_points(points),
+                )
+            )
 
     for margin_metric in ["gross_margin", "operating_margin", "rd_intensity"]:
         points = target_series.get(margin_metric, MetricSeries(margin_metric, METRIC_LABELS[margin_metric], [])).points
@@ -147,6 +192,306 @@ def build_financial_charts(companies: list[CompanyProfile], quarter_count: int =
     return charts, notes
 
 
+def fetch_cninfo_metric_series(company: CompanyProfile, quarter_count: int = 4) -> dict[str, MetricSeries]:
+    from .cninfo_fetcher import fetch_cninfo_filings
+
+    years = _recent_years_for_filings(quarter_count)
+    filings = fetch_cninfo_filings(
+        company.to_company_dict(),
+        kinds=["quarterly", "annual"],
+        years=years,
+        quarters=["Q1", "Q2", "Q3", "Q4"],
+        limit=max(quarter_count + 4, 12),
+    )
+    raw_metric_points: dict[str, list[FinancialDataPoint]] = {}
+    for filing in filings[: max(quarter_count + 2, 8)]:
+        if not str(filing.get("url") or "").casefold().endswith(".pdf"):
+            continue
+        points = _extract_cninfo_points_from_pdf(company, filing)
+        for point in points:
+            raw_metric_points.setdefault(point.metric, []).append(point)
+
+    series: dict[str, MetricSeries] = {}
+    for metric, points in raw_metric_points.items():
+        unique: dict[str, FinancialDataPoint] = {}
+        for point in points:
+            existing = unique.get(point.end_date)
+            if not existing or _cninfo_point_priority(point) > _cninfo_point_priority(existing):
+                unique[point.end_date] = point
+        latest = sorted(unique.values(), key=lambda point: point.end_date)[-quarter_count:]
+        if latest:
+            series[metric] = MetricSeries(metric, METRIC_LABELS.get(metric, metric), latest)
+
+    derived = _derived_margin_points(company, raw_metric_points, "gross_margin", "gross_profit", "revenue")
+    if derived:
+        series["gross_margin"] = MetricSeries("gross_margin", METRIC_LABELS["gross_margin"], sorted(derived, key=lambda point: point.end_date)[-quarter_count:])
+    derived = _derived_margin_points(company, raw_metric_points, "operating_margin", "operating_income", "revenue")
+    if derived:
+        series["operating_margin"] = MetricSeries("operating_margin", METRIC_LABELS["operating_margin"], sorted(derived, key=lambda point: point.end_date)[-quarter_count:])
+    derived = _derived_margin_points(company, raw_metric_points, "rd_intensity", "rd_expense", "revenue")
+    if derived:
+        series["rd_intensity"] = MetricSeries("rd_intensity", METRIC_LABELS["rd_intensity"], sorted(derived, key=lambda point: point.end_date)[-quarter_count:])
+    return series
+
+
+def _extract_cninfo_points_from_pdf(company: CompanyProfile, filing: dict[str, Any]) -> list[FinancialDataPoint]:
+    url = str(filing.get("url") or "")
+    title = str(filing.get("title") or "")
+    period_info = _cninfo_period_info(title, str(filing.get("date") or ""))
+    if not url or not period_info:
+        return []
+    try:
+        pdf_bytes = requests.get(url, timeout=18, headers={"User-Agent": "Mozilla/5.0"}).content
+    except Exception:
+        return []
+    try:
+        import pdfplumber
+    except Exception:
+        return []
+
+    metrics: dict[str, tuple[float, int, str]] = {}
+    with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+        max_pages = min(len(pdf.pages), 14)
+        for page_number, page in enumerate(pdf.pages[:max_pages], start=1):
+            try:
+                tables = page.extract_tables() or []
+            except Exception:
+                tables = []
+            for table in tables:
+                if period_info["kind"] == "annual":
+                    quarter_metrics = _extract_annual_quarter_points(company, filing, table, page_number, period_info["year"])
+                    if quarter_metrics:
+                        return quarter_metrics
+                for row_index, row in enumerate(table):
+                    row_values = ["" if cell is None else str(cell).strip() for cell in (row or [])]
+                    window_rows = table[row_index : row_index + 3]
+                    label = _row_label(row_values, window_rows)
+                    values = _numeric_cells(row_values, skip_leading_years=True)
+                    if not values:
+                        continue
+                    metric = _metric_from_cninfo_label(label)
+                    if not metric or metric in metrics:
+                        continue
+                    value_index = _cninfo_value_index(metric, period_info["kind"], values)
+                    if value_index >= len(values):
+                        continue
+                    metrics[metric] = (values[value_index], page_number, label)
+            if _cninfo_has_core_metrics(metrics):
+                break
+
+    points: list[FinancialDataPoint] = []
+    for metric, (value, page_number, label) in metrics.items():
+        if metric in {"gross_profit", "operating_income", "rd_expense"} and period_info["kind"] in {"h1", "annual"}:
+            continue
+        source = FinancialSource(
+            title=f"{company.ticker} 巨潮公告 {title}",
+            url=url,
+            accession="CNINFO",
+            form=str(filing.get("form") or ""),
+            filed=str(filing.get("date") or ""),
+            concept=f"CNINFO:{metric}:P{page_number}:{label[:80]}",
+            unit="CNY",
+        )
+        points.append(
+            FinancialDataPoint(
+                ticker=company.ticker,
+                company=company.name,
+                metric=metric,
+                metric_label=METRIC_LABELS.get(metric, metric),
+                period=period_info["period"],
+                end_date=period_info["end_date"],
+                value=value,
+                display_value=_format_reported_value(value, "CNY"),
+                unit="CNY",
+                series=company.ticker,
+                sources=[source],
+            )
+        )
+    return points
+
+
+def _row_window_label(rows: list[list[Any]]) -> str:
+    pieces: list[str] = []
+    for row in rows:
+        for cell in row or []:
+            text = "" if cell is None else str(cell).strip()
+            if text and not _looks_like_numeric_cell(text):
+                pieces.append(text)
+    return "".join(pieces)
+
+
+def _row_label(row_values: list[str], window_rows: list[list[Any]]) -> str:
+    direct = "".join(cell for cell in row_values[:4] if cell and not _looks_like_numeric_cell(cell))
+    return direct or _row_window_label(window_rows)
+
+
+def _numeric_cells_with_options(row: list[str], skip_leading_years: bool) -> list[float]:
+    values: list[float] = []
+    for index, cell in enumerate(row):
+        if skip_leading_years and index <= 3 and re.fullmatch(r"20\d{2}年?", (cell or "").strip()):
+            continue
+        value = _parse_cn_number(cell)
+        if value is not None:
+            values.append(value)
+    return values
+
+
+def _numeric_cells(row: list[str], skip_leading_years: bool = False) -> list[float]:
+    return _numeric_cells_with_options(row, skip_leading_years=skip_leading_years)
+
+
+def _extract_annual_quarter_points(
+    company: CompanyProfile,
+    filing: dict[str, Any],
+    table: list[list[Any]],
+    page_number: int,
+    year: str,
+) -> list[FinancialDataPoint]:
+    header_text = _row_window_label(table[:2])
+    if not all(token in header_text for token in ["第一季度", "第二季度", "第三季度", "第四季度"]):
+        return []
+    points: list[FinancialDataPoint] = []
+    quarter_end_dates = {
+        "Q1": f"{year}-03-31",
+        "Q2": f"{year}-06-30",
+        "Q3": f"{year}-09-30",
+        "Q4": f"{year}-12-31",
+    }
+    for row_index, row in enumerate(table):
+        row_values = ["" if cell is None else str(cell).strip() for cell in (row or [])]
+        label = _row_label(row_values, table[row_index : row_index + 3])
+        metric = _metric_from_cninfo_label(label)
+        if metric not in {"revenue", "net_income", "cash_from_operations"}:
+            continue
+        values = _numeric_cells(row_values)
+        if len(values) < 4:
+            continue
+        for quarter, value in zip(["Q1", "Q2", "Q3", "Q4"], values[:4]):
+            source = FinancialSource(
+                title=f"{company.ticker} 巨潮公告 {filing.get('title') or ''}",
+                url=str(filing.get("url") or ""),
+                accession="CNINFO",
+                form=str(filing.get("form") or ""),
+                filed=str(filing.get("date") or ""),
+                concept=f"CNINFO:{metric}:P{page_number}:{label[:80]}:{quarter}",
+                unit="CNY",
+            )
+            points.append(
+                FinancialDataPoint(
+                    ticker=company.ticker,
+                    company=company.name,
+                    metric=metric,
+                    metric_label=METRIC_LABELS.get(metric, metric),
+                    period=f"{year}{quarter}",
+                    end_date=quarter_end_dates[quarter],
+                    value=value,
+                    display_value=_format_reported_value(value, "CNY"),
+                    unit="CNY",
+                    series=company.ticker,
+                    sources=[source],
+                )
+            )
+    return points
+
+
+def _looks_like_numeric_cell(value: str) -> bool:
+    return _parse_cn_number(value) is not None or value.strip() in {"--", "-", "—"}
+
+
+def _parse_cn_number(value: str) -> float | None:
+    text = (value or "").replace(",", "").replace("，", "").strip()
+    if not text or text in {"--", "-", "—"} or "%" in text:
+        return None
+    text = text.replace("－", "-").replace("−", "-")
+    match = re.search(r"-?\d+(?:\.\d+)?", text)
+    if not match:
+        return None
+    try:
+        return float(match.group(0))
+    except Exception:
+        return None
+
+
+def _metric_from_cninfo_label(label: str) -> str:
+    compact = label.replace(" ", "")
+    if "营业收入" in compact and "营业成本" not in compact and "总成本" not in compact:
+        return "revenue"
+    if "归属于上市公司股东" in compact and "净利润" in compact and "扣除非经常" not in compact and "综合收益" not in compact:
+        return "net_income"
+    if "经营活动产生的现金流量净额" in compact:
+        return "cash_from_operations"
+    if "营业利润" in compact and "利润率" not in compact:
+        return "operating_income"
+    if "研发费用" in compact and "占" not in compact and "率" not in compact:
+        return "rd_expense"
+    if compact.startswith("存货") or compact == "存货":
+        return "inventory"
+    if "在建工程" in compact:
+        return "construction_in_progress"
+    return ""
+
+
+def _cninfo_value_index(metric: str, report_kind: str, values: list[float]) -> int:
+    if metric in {"inventory", "construction_in_progress"}:
+        return 0
+    if metric == "cash_from_operations" and report_kind in {"q1", "q3"} and len(values) >= 3:
+        return 2
+    return 0
+
+
+def _cninfo_has_core_metrics(metrics: dict[str, tuple[float, int, str]]) -> bool:
+    return "revenue" in metrics and ("net_income" in metrics or "inventory" in metrics)
+
+
+def _cninfo_period_info(title: str, fallback_year: str = "") -> dict[str, str]:
+    year = _year_from_text(title) or _year_from_text(fallback_year)
+    if not year:
+        return {}
+    if "第一季度" in title or "一季度" in title:
+        return {"kind": "q1", "period": f"{year}Q1", "end_date": f"{year}-03-31", "year": year}
+    if "半年度" in title or "中期" in title:
+        return {"kind": "h1", "period": f"{year}H1", "end_date": f"{year}-06-30", "year": year}
+    if "第三季度" in title or "三季度" in title:
+        return {"kind": "q3", "period": f"{year}Q3", "end_date": f"{year}-09-30", "year": year}
+    if "年度报告" in title or "年报" in title:
+        return {"kind": "annual", "period": f"FY{year}", "end_date": f"{year}-12-31", "year": year}
+    return {}
+
+
+def _year_from_text(text: str) -> str:
+    match = re.search(r"(20\d{2})", text or "")
+    return match.group(1) if match else ""
+
+
+def _recent_years_for_filings(quarter_count: int) -> list[str]:
+    end_year = date.today().year
+    year_count = max(2, min(5, (quarter_count + 3) // 4 + 2))
+    return [str(end_year - offset) for offset in range(year_count)]
+
+
+def _cninfo_point_priority(point: FinancialDataPoint) -> tuple[int, str]:
+    accession = point.sources[0].accession if point.sources else ""
+    source_score = 1 if accession == "CNINFO" else 0
+    period_score = 2 if "Q" in point.period else 1
+    return (source_score + period_score, point.period)
+
+
+def _is_china_a_share(company: CompanyProfile) -> bool:
+    text = f"{company.ticker} {company.local_code} {company.market} {company.exchange} {company.country}".casefold()
+    if "a股" in text or "szse" in text or "sse" in text or "bjse" in text:
+        return True
+    return bool(company.local_code and company.local_code.isdigit() and len(company.local_code) == 6 and "中国" in company.country)
+
+
+def _compact_wind_error(exc: Exception) -> str:
+    text = str(exc)
+    if "QUOTA_ERROR" in text or "余额" in text or "充值" in text:
+        return "Wind 当前额度/余额不足，已自动改用巨潮官方 PDF 表格兜底。"
+    if len(text) > 220:
+        return text[:220] + "..."
+    return text
+
+
 def fetch_company_metric_series(company: CompanyProfile, quarter_count: int = 4) -> dict[str, MetricSeries]:
     facts = request_json(f"https://data.sec.gov/api/xbrl/companyfacts/CIK{str(company.cik).lstrip('0').zfill(10)}.json", timeout=14)
     us_gaap = facts.get("facts", {}).get("us-gaap", {})
@@ -172,9 +517,10 @@ def fetch_company_metric_series(company: CompanyProfile, quarter_count: int = 4)
 
 def fetch_wind_metric_series(company: CompanyProfile, quarter_count: int = 4) -> dict[str, MetricSeries]:
     periods = _recent_completed_quarters(quarter_count)
+    errors: list[str] = []
     for windcode in _windcode_candidates(company):
         raw_metric_points: dict[str, list[FinancialDataPoint]] = {}
-        for period, row, units in _fetch_wind_period_rows(windcode, periods):
+        for period, row, units in _fetch_wind_period_rows(windcode, periods, errors):
             if not row:
                 continue
             currency = str(row.get("记账本位币") or row.get("交易币种") or "")
@@ -217,29 +563,33 @@ def fetch_wind_metric_series(company: CompanyProfile, quarter_count: int = 4) ->
             series["rd_intensity"] = MetricSeries("rd_intensity", METRIC_LABELS["rd_intensity"], derived)
         if series:
             return series
+    if errors:
+        raise RuntimeError("; ".join(dict.fromkeys(errors))[:1000])
     return {}
 
-def _fetch_wind_period_rows(windcode: str, periods: list[str]) -> list[tuple[str, dict[str, Any], dict[str, str]]]:
-    bulk_rows = _fetch_wind_bulk_rows(windcode, periods)
+def _fetch_wind_period_rows(windcode: str, periods: list[str], errors: list[str] | None = None) -> list[tuple[str, dict[str, Any], dict[str, str]]]:
+    bulk_rows = _fetch_wind_bulk_rows(windcode, periods, errors)
     by_period = {period: (row, units) for period, row, units in bulk_rows}
     rows: list[tuple[str, dict[str, Any], dict[str, str]]] = []
     for period in periods:
         row, units = by_period.get(period, ({}, {}))
         if not row or _extract_wind_metrics(row, units, period, str(row.get("记账本位币") or row.get("交易币种") or "")).get("revenue") is None:
-            fallback_row, fallback_units = _fetch_wind_period_row(windcode, period)
+            fallback_row, fallback_units = _fetch_wind_period_row(windcode, period, errors)
             row = {**row, **fallback_row}
             units = {**units, **fallback_units}
         rows.append((period, row, units))
     return rows
 
 
-def _fetch_wind_bulk_rows(windcode: str, periods: list[str]) -> list[tuple[str, dict[str, Any], dict[str, str]]]:
+def _fetch_wind_bulk_rows(windcode: str, periods: list[str], errors: list[str] | None = None) -> list[tuple[str, dict[str, Any], dict[str, str]]]:
     if len(periods) < 2:
         return []
     suffix = f"{periods[0]}{periods[-1]}revenuegrossmarginoperatingmargin"
     try:
         result = wind_financial_query(windcode, suffix)
-    except Exception:
+    except Exception as exc:
+        if errors is not None:
+            errors.append(f"{windcode}: {exc}")
         return []
     rows_with_units: list[tuple[str, dict[str, Any], dict[str, str]]] = []
     for table in parse_wind_tables(result):
@@ -251,7 +601,7 @@ def _fetch_wind_bulk_rows(windcode: str, periods: list[str]) -> list[tuple[str, 
     return rows_with_units
 
 
-def _fetch_wind_period_row(windcode: str, period: str) -> tuple[dict[str, Any], dict[str, str]]:
+def _fetch_wind_period_row(windcode: str, period: str, errors: list[str] | None = None) -> tuple[dict[str, Any], dict[str, str]]:
     suffixes = [
         f"{period}营业收入销售毛利率营业利润率营业利润营业成本净利润研发费用",
         f"{period}revenuegrossmarginoperatingmargin",
@@ -261,7 +611,9 @@ def _fetch_wind_period_row(windcode: str, period: str) -> tuple[dict[str, Any], 
     for suffix in suffixes:
         try:
             result = wind_financial_query(windcode, suffix)
-        except Exception:
+        except Exception as exc:
+            if errors is not None:
+                errors.append(f"{windcode} {period}: {exc}")
             continue
         tables = parse_wind_tables(result)
         for table in tables:
@@ -279,7 +631,9 @@ def _extract_wind_metrics(row: dict[str, Any], units: dict[str, str], period: st
     if revenue is None:
         revenue = _pick_numeric_column(row, units, include=["营业总收入"], exclude=["成本"])
 
-    gross_profit = _pick_numeric_column(row, units, include=["毛利"], exclude=["毛利率"])
+    gross_profit = _pick_numeric_column(row, units, include=["毛利润"], exclude=["毛利率", "毛利"])
+    if gross_profit is None:
+        gross_profit = _pick_numeric_column(row, units, include=["毛利额"], exclude=["毛利率", "毛利"])
     cost = _pick_numeric_column(row, units, include=["营业成本"], exclude=["总成本"])
     if gross_profit is None and revenue and cost:
         gross_profit = {
@@ -292,6 +646,8 @@ def _extract_wind_metrics(row: dict[str, Any], units: dict[str, str], period: st
     net_income = _pick_numeric_column(row, units, include=["净利润"], exclude=["净利率", "ROE", "ROA"])
     rd_expense = _pick_numeric_column(row, units, include=["研发费用"], exclude=["占比", "率"])
     gross_margin = _pick_numeric_column(row, units, include=["毛利率"], exclude=[])
+    if gross_margin is None:
+        gross_margin = _pick_ratio_column(row, units, include=["毛利"], exclude=["毛利润", "毛利额"])
     operating_margin = _pick_numeric_column(row, units, include=["营业利润率"], exclude=[])
     if operating_margin is None:
         operating_margin = _pick_numeric_column(row, units, include=["营业利润/营业总收入"], exclude=[])
@@ -332,8 +688,26 @@ def _pick_numeric_column(row: dict[str, Any], units: dict[str, str], include: li
     return {"column": name, "unit": units.get(name, ""), "value": value}
 
 
+def _pick_ratio_column(row: dict[str, Any], units: dict[str, str], include: list[str], exclude: list[str]) -> dict[str, Any] | None:
+    for name, value in row.items():
+        if not _is_number(value):
+            continue
+        if not all(token in name for token in include):
+            continue
+        if any(token in name for token in exclude):
+            continue
+        unit = units.get(name, "")
+        numeric_value = float(value)
+        if unit == "%" or abs(numeric_value) <= 1:
+            return {"column": name, "unit": unit or "ratio", "value": numeric_value}
+    return None
+
+
 def _as_percent_metric(value: dict[str, Any], period: str, label: str) -> dict[str, Any]:
-    return {"column": value.get("column") or f"{period}{label}", "unit": "%", "value": value["value"]}
+    numeric_value = float(value["value"])
+    if value.get("unit") != "%" and abs(numeric_value) <= 1:
+        numeric_value *= 100
+    return {"column": value.get("column") or f"{period}{label}", "unit": "%", "value": numeric_value}
 
 
 def _is_number(value: Any) -> bool:
@@ -501,6 +875,19 @@ def _format_wind_value(value: float, unit: str, currency: str) -> str:
     return f"{label} {value:,.0f}".strip()
 
 
+def _format_reported_value(value: float, unit: str) -> str:
+    if unit == "percent":
+        return f"{value:.1f}%"
+    if unit == "CNY":
+        absolute = abs(value)
+        if absolute >= 100_000_000:
+            return f"CNY {value / 100_000_000:.2f}亿"
+        if absolute >= 10_000:
+            return f"CNY {value / 10_000:.1f}万"
+        return f"CNY {value:,.0f}"
+    return _format_value(value, unit)
+
+
 def _source_subtitle(points: list[FinancialDataPoint], fallback: str) -> str:
     if any(any(source.accession == "Wind MCP" for source in point.sources) for point in points):
         return "Latest quarters from Wind fundamentals and/or regulatory filings; click any point to inspect source metadata."
@@ -509,11 +896,14 @@ def _source_subtitle(points: list[FinancialDataPoint], fallback: str) -> str:
 
 def _source_note_for_points(points: list[FinancialDataPoint]) -> str:
     has_wind = any(any(source.accession == "Wind MCP" for source in point.sources) for point in points)
-    has_sec = any(any(source.accession and source.accession != "Wind MCP" for source in point.sources) for point in points)
-    if has_wind and has_sec:
-        return "Mixed SEC XBRL companyfacts and Wind fundamentals. Wind data source: 万得 Wind 金融数据服务."
+    has_cninfo = any(any(source.accession == "CNINFO" for source in point.sources) for point in points)
+    has_sec = any(any(source.accession and source.accession not in {"Wind MCP", "CNINFO"} for source in point.sources) for point in points)
+    if has_wind and (has_sec or has_cninfo):
+        return "Mixed regulatory filings and Wind fundamentals. Wind data source: 万得 Wind 金融数据服务."
     if has_wind:
         return WIND_SOURCE_NOTE
+    if has_cninfo:
+        return "巨潮资讯官方公告 PDF 表格提取；每个点保留公告链接、页码和表格行来源。"
     return "SEC XBRL companyfacts; each point links to the filing accession index."
 
 

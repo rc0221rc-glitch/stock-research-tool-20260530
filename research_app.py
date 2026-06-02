@@ -7,7 +7,7 @@ from typing import Any
 import streamlit as st
 
 for _module_name in list(sys.modules):
-    if _module_name.startswith("src.research_") or _module_name == "src.wind_client":
+    if _module_name.startswith("src.research_") or _module_name in {"src.wind_client", "src.cninfo_fetcher", "src.company_search_global"}:
         sys.modules.pop(_module_name, None)
 
 from src.research_anomalies import POSITIVE, RISK
@@ -174,8 +174,8 @@ def render_task_runner(user_id: str, claude_api_key: str, deepseek_api_key: str,
 
         progress = st.progress(0, text="任务已提交：准备可比组与证据源")
         try:
-            progress.progress(18, text="抓取官方披露、IR、Transcript 与外部候选来源")
-            with st.spinner("正在收集证据。这个阶段会访问 SEC、IR、Transcript 平台和搜索入口，可能需要几十秒…"):
+            progress.progress(18, text="按市场抓取官方披露、IR、Transcript 与外部候选来源")
+            with st.spinner("正在收集证据。美股走 SEC，A股走巨潮资讯/Wind，港股走 HKEX/IR，并补充 Transcript 与搜索入口…"):
                 draft = collect_research_draft(
                     st.session_state.target_query,
                     quarter_count=st.session_state.quarter_count,
@@ -237,7 +237,7 @@ def render_draft_review(user_id: str, deepseek_api_key: str) -> None:
             st.dataframe([run.to_dict() for run in draft.model_runs], use_container_width=True, hide_index=True)
     with tab_charts:
         if not draft.financial_charts:
-            st.warning("本轮没有生成真实财务图表。可能是目标公司或可比公司没有 SEC XBRL 数据，下一阶段需要接入 IR 表格 / 港股 / A股公告数据。")
+            st.warning("本轮没有生成真实财务图表。可能是 SEC / Wind / 巨潮 PDF 表格暂时不可用，或目标公司披露格式需要继续适配。")
         for chart in draft.financial_charts:
             with st.container(border=True):
                 st.markdown(f"### {chart.title}")

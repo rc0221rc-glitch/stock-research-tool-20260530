@@ -419,6 +419,8 @@ def _fallback_blueprints(target: CompanyProfile) -> list[dict[str, object]]:
                 "tickers": ["NVDA", "AMD", "MSFT", "AMZN", "SMCI"],
             },
         ]
+    if target.source_hint and "global company search" in target.source_hint.casefold() or target.source_hint in {"巨潮资讯公司搜索", "Yahoo Finance 全球搜索", "SEC company_tickers"}:
+        return []
     return [
         {
             "group_id": "ai_chain_default",

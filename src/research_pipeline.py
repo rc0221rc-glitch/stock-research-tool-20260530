@@ -42,7 +42,7 @@ def collect_research_draft(
     selected_anomalies: list[ObjectiveAnomaly] | None = None,
 ) -> ResearchDraft:
     target = get_company_profile(target_query)
-    groups = comparable_groups or recommend_comparable_groups(target.ticker or target.name)
+    groups = recommend_comparable_groups(target.ticker or target.name) if comparable_groups is None else comparable_groups
     companies = _selected_companies(target, groups, max_companies=max_companies)
     years = recent_years_for_quarters(quarter_count)
     quarters = QUARTER_OPTIONS
@@ -596,7 +596,9 @@ def _company_source_jobs(
 ) -> list[tuple[Any, tuple[Any, ...], dict[str, Any]]]:
     jobs: list[tuple[Any, tuple[Any, ...], dict[str, Any]]] = []
     if company.is_public:
-        if company.cik:
+        if _is_china_a_share(company):
+            jobs.append((_collect_cninfo_evidence, (company, years, quarters), {}))
+        elif company.cik:
             jobs.append((_collect_sec_evidence, (company, years), {}))
         jobs.append((_collect_ir_evidence, (company, claude_api_key), {}))
         jobs.append((_collect_transcript_evidence, (company, claude_api_key), {}))
@@ -624,6 +626,25 @@ def _collect_sec_evidence(company: CompanyProfile, years: list[str]) -> tuple[li
         return [_to_evidence_item(item, company) for item in dedupe_links(raw_items)[:16]], []
     except Exception as exc:
         return [], [f"{company.ticker}: SEC 抓取失败：{exc}"]
+
+
+def _collect_cninfo_evidence(company: CompanyProfile, years: list[str], quarters: list[str]) -> tuple[list[EvidenceItem], list[str]]:
+    try:
+        from .cninfo_fetcher import fetch_cninfo_filings
+
+        raw_items = fetch_cninfo_filings(
+            company.to_company_dict(),
+            kinds=["annual", "quarterly"],
+            years=years,
+            quarters=quarters,
+            limit=24,
+        )
+        items = [_to_evidence_item(item, company) for item in dedupe_links(raw_items)[:24]]
+        if items:
+            return items, [f"{company.ticker}: 已从巨潮资讯获取 {len(items)} 条 A股官方年报/季报 PDF。"]
+        return [], [f"{company.ticker}: 巨潮资讯未返回匹配的官方年报/季报 PDF。"]
+    except Exception as exc:
+        return [], [f"{company.ticker}: 巨潮资讯官方公告抓取失败：{exc}"]
 
 
 def _collect_ir_evidence(company: CompanyProfile, claude_api_key: str) -> tuple[list[EvidenceItem], list[str]]:
@@ -769,3 +790,10 @@ def _dedupe_evidence(items: list[EvidenceItem]) -> list[EvidenceItem]:
 def _is_china_related(company: CompanyProfile) -> bool:
     text = f"{company.name} {company.market} {company.description}".casefold()
     return any(token in text for token in ["china", "hong kong", "taiwan", "中", "港", "台", "smic", "tsmc"])
+
+
+def _is_china_a_share(company: CompanyProfile) -> bool:
+    text = f"{company.ticker} {company.local_code} {company.market} {company.exchange} {company.country}".casefold()
+    if "a股" in text or "szse" in text or "sse" in text or "bjse" in text:
+        return True
+    return bool(company.local_code and company.local_code.isdigit() and len(company.local_code) == 6 and "中国" in company.country)

@@ -750,6 +750,16 @@ def _yahoo_company_search(query: str) -> list[dict[str, Any]]:
     return companies
 
 
+@lru_cache(maxsize=128)
+def _cninfo_company_search(query: str) -> list[dict[str, Any]]:
+    try:
+        from .cninfo_fetcher import search_cninfo_companies
+
+        return search_cninfo_companies(query, limit=8)
+    except Exception:
+        return []
+
+
 def _merge_results(primary: list[dict[str, Any]], secondary: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
     merged: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -793,9 +803,18 @@ def search_companies(query: str, limit: int = 12, include_sec: bool = True) -> l
             yahoo_scored.append(enriched)
     yahoo_scored.sort(key=lambda item: item["match_score"], reverse=True)
 
+    cninfo_scored = []
+    for company in _cninfo_company_search(query):
+        score = _score_company(query, company)
+        if score >= 0.60:
+            enriched = dict(company)
+            enriched["match_score"] = max(score, 0.96 if normalize_text(query) in {normalize_text(company.get("name", "")), normalize_text(company.get("local_code", ""))} else score)
+            cninfo_scored.append(enriched)
+    cninfo_scored.sort(key=lambda item: item["match_score"], reverse=True)
+
     sec_scored: list[dict[str, Any]] = []
     if include_sec:
-        non_sec_has_strong_match = any(item["match_score"] >= 0.90 for item in [*local_scored, *yahoo_scored])
+        non_sec_has_strong_match = any(item["match_score"] >= 0.90 for item in [*local_scored, *cninfo_scored, *yahoo_scored])
         sec_threshold = 0.90 if non_sec_has_strong_match else 0.58
         for company in _sec_company_tickers():
             score = _score_company(query, company)
@@ -804,7 +823,7 @@ def search_companies(query: str, limit: int = 12, include_sec: bool = True) -> l
                 enriched["match_score"] = score
                 sec_scored.append(enriched)
         sec_scored.sort(key=lambda item: item["match_score"], reverse=True)
-    return _merge_results(_merge_results(local_scored, yahoo_scored, limit), sec_scored, limit)
+    return _merge_results(_merge_results(_merge_results(local_scored, cninfo_scored, limit), yahoo_scored, limit), sec_scored, limit)
 
 
 def find_best_company(query: str) -> dict[str, Any] | None:

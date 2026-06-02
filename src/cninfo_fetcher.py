@@ -68,6 +68,86 @@ def _stock_code(company: dict[str, Any]) -> str:
     return ""
 
 
+def _exchange_for_code(code: str) -> str:
+    if code.startswith(("6", "9")):
+        return "SSE"
+    if code.startswith(("0", "2", "3")):
+        return "SZSE"
+    if code.startswith(("4", "8")):
+        return "BJSE"
+    return "CNINFO"
+
+
+def _ticker_for_code(code: str) -> str:
+    exchange = _exchange_for_code(code)
+    suffix = {"SSE": ".SH", "SZSE": ".SZ", "BJSE": ".BJ"}.get(exchange, "")
+    return f"{code}{suffix}" if suffix else code
+
+
+CNINFO_KNOWN_ENGLISH_ALIASES = {
+    "zhongji innolight": "中际旭创",
+    "innolight": "中际旭创",
+    "eoptolink": "新易盛",
+    "tfc communication": "天孚通信",
+    "tianfu communication": "天孚通信",
+}
+
+CNINFO_KNOWN_ALIASES_BY_NAME = {
+    "中际旭创": ["Zhongji Innolight", "Innolight"],
+    "新易盛": ["Eoptolink"],
+    "天孚通信": ["TFC Communication", "Tianfu Communication"],
+}
+
+
+def search_cninfo_companies(query: str, limit: int = 8) -> list[dict[str, Any]]:
+    original_keyword = (query or "").strip()
+    keyword = original_keyword
+    if not keyword:
+        return []
+    keyword = CNINFO_KNOWN_ENGLISH_ALIASES.get(keyword.casefold(), keyword)
+    session = _session()
+    results: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for row in _top_search(session, keyword):
+        code = str(row.get("code") or "").strip()
+        name = str(row.get("zwjc") or row.get("secName") or "").strip()
+        if not code or not name or code in seen:
+            continue
+        category = str(row.get("category") or "")
+        if category and category != "A股":
+            continue
+        exchange = _exchange_for_code(code)
+        ticker = _ticker_for_code(code)
+        aliases = [
+            name,
+            code,
+            ticker,
+            str(row.get("pinyin") or "").strip(),
+            *CNINFO_KNOWN_ALIASES_BY_NAME.get(name, []),
+            original_keyword if original_keyword != keyword else "",
+        ]
+        results.append(
+            {
+                "name": name,
+                "name_en": name,
+                "ticker": ticker,
+                "local_code": code,
+                "market": "A股",
+                "exchange": exchange,
+                "country": "中国",
+                "flag": "🇨🇳",
+                "ir_url": f"{CNINFO_BASE}/new/disclosure/stock?stockCode={code}",
+                "cik": "",
+                "aliases": [alias for alias in aliases if alias],
+                "source": "巨潮资讯公司搜索",
+            }
+        )
+        seen.add(code)
+        if len(results) >= limit:
+            break
+    return results
+
+
 def _top_search(session: requests.Session, keyword: str) -> list[dict[str, Any]]:
     if not keyword:
         return []
