@@ -5,9 +5,13 @@ import os
 import uuid
 from dataclasses import asdict
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 import requests
+
+
+LOCAL_EVENT_LOG = Path("downloads") / "research_access_logs.jsonl"
 
 
 def is_supabase_configured() -> bool:
@@ -26,6 +30,7 @@ def create_research_job(user_id: str, target: str, quarter_count: int, payload: 
     }
     if is_supabase_configured():
         _supabase_insert("research_jobs", job)
+    _append_local_event("research_jobs", job)
     return job
 
 
@@ -42,6 +47,7 @@ def store_report_metadata(job_id: str, user_id: str, report_type: str, path: str
     }
     if is_supabase_configured():
         _supabase_insert("research_reports", record)
+    _append_local_event("research_reports", record)
     return record
 
 
@@ -56,6 +62,7 @@ def log_research_event(user_id: str, event_type: str, report_id: str = "", metad
     }
     if is_supabase_configured():
         _supabase_insert("research_access_logs", event)
+    _append_local_event("research_access_logs", event)
     return event
 
 
@@ -126,3 +133,10 @@ def _safe_payload(value: Any) -> dict[str, Any]:
     if isinstance(value, dict):
         return value
     return {"value": str(value)}
+
+
+def _append_local_event(table: str, record: dict[str, Any]) -> None:
+    LOCAL_EVENT_LOG.parent.mkdir(parents=True, exist_ok=True)
+    line = {"table": table, "record": record}
+    with LOCAL_EVENT_LOG.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(line, ensure_ascii=False, default=str) + "\n")

@@ -7,6 +7,7 @@ from typing import Any
 from .research_financials import build_financial_charts
 from .research_llm import generate_deepseek_research_signals, missing_deepseek_key_record, resolve_deepseek_api_key
 from .research_models import AuditFinding, CompanyProfile, EvidenceItem, FinancialChart, ResearchDraft, ResearchSignal, SignalScore
+from .research_screenshots import capture_evidence_screenshots
 from .research_universe import get_company_profile, recommend_comparable_groups
 from .research_validation import validate_research_draft
 from .utils import dedupe_links, run_limited
@@ -29,8 +30,13 @@ def collect_research_draft(
     claude_api_key: str = "",
     deepseek_api_key: str = "",
     require_llm: bool = False,
+    enable_llm: bool = True,
     include_external_search: bool = True,
     max_companies: int = 12,
+    capture_screenshots: bool = True,
+    task_mode: str = "streamlit_sync_prototype",
+    user_id: str = "",
+    job_id: str = "",
 ) -> ResearchDraft:
     target = get_company_profile(target_query)
     groups = comparable_groups or recommend_comparable_groups(target.ticker or target.name)
@@ -50,6 +56,8 @@ def collect_research_draft(
             run_notes.extend(notes)
 
     evidence = _dedupe_evidence(evidence)
+    if capture_screenshots:
+        run_notes.extend(capture_evidence_screenshots(evidence, limit=3))
     financial_charts, financial_notes = build_financial_charts(companies, quarter_count=quarter_count)
     run_notes.extend(financial_notes)
     audit_findings = audit_evidence(evidence, target, groups, financial_charts)
@@ -57,8 +65,8 @@ def collect_research_draft(
     signals = fallback_signals
     next_fetch_plan = build_next_fetch_plan(evidence, signals, groups, financial_charts)
     model_runs = []
-    deepseek_api_key = resolve_deepseek_api_key(deepseek_api_key)
-    if deepseek_api_key:
+    deepseek_api_key = resolve_deepseek_api_key(deepseek_api_key) if enable_llm else ""
+    if enable_llm and deepseek_api_key:
         llm_signals, llm_plan, model_run = generate_deepseek_research_signals(
             api_key=deepseek_api_key,
             target_name=target.name,
@@ -73,7 +81,7 @@ def collect_research_draft(
             signals = llm_signals
             if llm_plan:
                 next_fetch_plan = llm_plan
-    elif require_llm:
+    elif enable_llm and require_llm:
         model_runs.append(missing_deepseek_key_record())
     draft = ResearchDraft(
         target=target,
@@ -87,6 +95,18 @@ def collect_research_draft(
         financial_charts=financial_charts,
         model_runs=model_runs,
         run_notes=run_notes,
+        run_metadata={
+            "task_mode": task_mode,
+            "job_id": job_id,
+            "user_id": user_id,
+            "queue_statuses": ["submitted", "collecting_evidence", "model_analysis", "validation_ready"],
+            "permissions": {
+                "visibility": "authorized",
+                "access_logs": "local_or_supabase",
+                "user_id_required": bool(user_id),
+            },
+            "mobile_validation": {},
+        },
     )
     draft.validation_report = validate_research_draft(draft)
     if any(run.status == "success" for run in model_runs):
@@ -308,6 +328,19 @@ def build_next_fetch_plan(evidence: list[EvidenceItem], signals: list[ResearchSi
 def _selected_companies(target: CompanyProfile, groups: list[Any], max_companies: int) -> list[CompanyProfile]:
     companies: list[CompanyProfile] = [target]
     seen = {target.ticker.upper()}
+    private_companies = [
+        company
+        for group in groups
+        for company in group.companies
+        if not company.is_public
+    ]
+    priority_companies = [*private_companies]
+    for company in priority_companies:
+        key = company.ticker.upper()
+        if key in seen:
+            continue
+        seen.add(key)
+        companies.append(company)
     for group in groups:
         for company in group.companies:
             key = company.ticker.upper()
@@ -336,6 +369,8 @@ def _company_source_jobs(
     if include_external_search:
         jobs.append((_collect_bing_evidence, (company, years, quarters), {}))
         jobs.append((_collect_platform_evidence, (company, years, quarters), {}))
+        if not company.is_public:
+            jobs.append((_collect_private_company_evidence, (company,), {}))
         if _is_china_related(company):
             jobs.append((_collect_china_evidence, (company, years, quarters), {}))
     return jobs
@@ -405,6 +440,16 @@ def _collect_platform_evidence(company: CompanyProfile, years: list[str], quarte
         return [], [f"{company.ticker}: 平台搜索失败：{exc}"]
 
 
+def _collect_private_company_evidence(company: CompanyProfile) -> tuple[list[EvidenceItem], list[str]]:
+    try:
+        from .private_company_sources import find_private_company_evidence
+
+        raw_items = find_private_company_evidence(company.to_company_dict(), max_results=10)
+        return [_to_evidence_item(item, company) for item in dedupe_links(raw_items)[:10]], []
+    except Exception as exc:
+        return [], [f"{company.ticker}: 私有公司公开证据搜索失败：{exc}"]
+
+
 def _collect_china_evidence(company: CompanyProfile, years: list[str], quarters: list[str]) -> tuple[list[EvidenceItem], list[str]]:
     try:
         from .china_sources import find_china_research_links
@@ -422,6 +467,12 @@ def _to_evidence_item(item: dict[str, Any], company: CompanyProfile) -> Evidence
     title = str(item.get("title") or url or "Untitled")
     confidence_tier, reason = _confidence_for_item(source, url)
     evidence_type = _kind_for_item(kind, title, url)
+    note = str(item.get("note") or "")
+    if kind == "private_company" or note.startswith("private_company_signal"):
+        evidence_type = "private_company"
+        if confidence_tier in {"medium", "search"}:
+            confidence_tier = "media" if any(token in f"{source} {url}".casefold() for token in ["reuters", "cnbc", "information", "semafor"]) else "platform"
+        reason = f"私有模型公司公开线索（{note.replace('private_company_signal:', '') or source}），需与合作方、媒体和官方披露交叉验证。"
     return EvidenceItem(
         title=title,
         url=url,

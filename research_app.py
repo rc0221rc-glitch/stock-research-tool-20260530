@@ -124,7 +124,9 @@ def render_comparable_editor() -> list[Any]:
 def render_task_runner(user_id: str, claude_api_key: str, deepseek_api_key: str, selected_groups: list[Any]) -> None:
     st.subheader("3. 提交任务 → 进度 → 证据审计与信号草稿")
     include_external_search = st.checkbox("启用外部公开信息搜索（媒体、平台、私有玩家线索）", value=True)
-    require_llm = st.checkbox("必须调用 DeepSeek 大模型完成信号分析", value=True)
+    capture_screenshots = st.checkbox("为关键证据生成网页/PDF 截图", value=True)
+    enable_llm = st.checkbox("启用 DeepSeek 大模型完成信号分析", value=True)
+    require_llm = st.checkbox("启用后必须成功调用 DeepSeek，否则标记失败", value=True)
     max_companies = st.slider("本轮最多抓取研究对象数", min_value=4, max_value=20, value=12, help="原型阶段建议先控制数量，避免单次运行过慢。")
     if st.button("生成证据审计和信号草稿", type="primary", use_container_width=True):
         job = create_research_job(
@@ -148,8 +150,13 @@ def render_task_runner(user_id: str, claude_api_key: str, deepseek_api_key: str,
                     claude_api_key=claude_api_key,
                     deepseek_api_key=deepseek_api_key,
                     require_llm=require_llm,
+                    enable_llm=enable_llm,
                     include_external_search=include_external_search,
                     max_companies=max_companies,
+                    capture_screenshots=capture_screenshots,
+                    task_mode="streamlit_sync_prototype",
+                    user_id=user_id,
+                    job_id=job["id"],
                 )
             progress.progress(88, text="生成证据审计、模型记录与自动验收清单")
             st.session_state.research_draft = draft

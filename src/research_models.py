@@ -242,6 +242,7 @@ class ResearchDraft:
     validation_report: ValidationReport | None = None
     report_label: str = "原型草稿：未完成专业深度研究"
     run_notes: list[str] = field(default_factory=list)
+    run_metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -258,4 +259,5 @@ class ResearchDraft:
             "validation_report": self.validation_report.to_dict() if self.validation_report else None,
             "report_label": self.report_label,
             "run_notes": self.run_notes,
+            "run_metadata": self.run_metadata,
         }

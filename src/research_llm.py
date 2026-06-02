@@ -39,7 +39,7 @@ def generate_deepseek_research_signals(
     evidence: list[EvidenceItem],
     financial_charts: list[FinancialChart],
     fallback_signals: list[ResearchSignal],
-    timeout: int = 90,
+    timeout: int = 180,
 ) -> tuple[list[ResearchSignal], list[str], ModelRunRecord]:
     started = datetime.now()
     start = time.monotonic()
@@ -223,7 +223,7 @@ def _build_payload(
             for group in comparable_groups
         ],
         "financial_charts": [_chart_summary(chart) for chart in financial_charts],
-        "evidence": [_evidence_summary(index, item) for index, item in enumerate(evidence[:120])],
+        "evidence": [_evidence_summary(index, item) for index, item in _select_prompt_evidence(evidence, limit=60)],
         "fallback_signal_templates": [
             {
                 "title": signal.title,
@@ -305,6 +305,34 @@ def _evidence_summary(index: int, item: EvidenceItem) -> dict[str, Any]:
         "title": item.title[:220],
         "url": item.url,
     }
+
+
+def _select_prompt_evidence(evidence: list[EvidenceItem], limit: int) -> list[tuple[int, EvidenceItem]]:
+    priority = {
+        "official": 0,
+        "platform": 1,
+        "media": 2,
+        "search": 3,
+        "medium": 4,
+    }
+    type_priority = {
+        "private_company": 0,
+        "presentation": 1,
+        "transcript": 2,
+        "annual": 3,
+        "quarterly": 4,
+    }
+    indexed = list(enumerate(evidence))
+    selected = sorted(
+        indexed,
+        key=lambda pair: (
+            0 if pair[1].screenshot_path else 1,
+            type_priority.get(pair[1].evidence_type, 8),
+            priority.get(pair[1].confidence_tier, 9),
+            pair[1].ticker,
+        ),
+    )
+    return selected[:limit]
 
 
 def _parse_json_object(content: str) -> dict[str, Any]:

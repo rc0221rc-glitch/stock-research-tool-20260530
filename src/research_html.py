@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 
 from .research_models import EvidenceItem, FinancialChart, FinancialDataPoint, ResearchDraft, ResearchSignal
+from .research_validation import validate_research_draft
 from .utils import clean_filename
 
 
@@ -18,6 +19,7 @@ def save_memo_html(draft: ResearchDraft, output_dir: str | Path = OUTPUT_DIR) ->
     filename = clean_filename(f"{draft.target.ticker or draft.target.name}_investment_memo_{suffix}_{draft.generated_at[:10]}", "investment_memo")
     path = output / f"{filename}.html"
     path.write_text(render_memo_html(draft), encoding="utf-8")
+    _run_mobile_validation_if_needed(path, draft)
     return path
 
 
@@ -28,7 +30,24 @@ def save_dashboard_html(draft: ResearchDraft, output_dir: str | Path = OUTPUT_DI
     filename = clean_filename(f"{draft.target.ticker or draft.target.name}_research_dashboard_{suffix}_{draft.generated_at[:10]}", "research_dashboard")
     path = output / f"{filename}.html"
     path.write_text(render_dashboard_html(draft), encoding="utf-8")
+    _run_mobile_validation_if_needed(path, draft)
     return path
+
+
+def _run_mobile_validation_if_needed(path: Path, draft: ResearchDraft) -> None:
+    if draft.run_metadata.get("_mobile_validation_running"):
+        return
+    try:
+        from .research_mobile_validation import validate_mobile_html
+
+        draft.run_metadata["_mobile_validation_running"] = True
+        validate_mobile_html(path, draft)
+        draft.validation_report = validate_research_draft(draft)
+        path.write_text(render_memo_html(draft) if "investment_memo" in path.name else render_dashboard_html(draft), encoding="utf-8")
+    except Exception as exc:
+        draft.run_metadata.setdefault("mobile_validation", {"passed": False, "error": str(exc)})
+    finally:
+        draft.run_metadata.pop("_mobile_validation_running", None)
 
 
 def render_memo_html(draft: ResearchDraft) -> str:

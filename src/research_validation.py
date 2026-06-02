@@ -270,38 +270,45 @@ def _check_interactive_html_support(draft: ResearchDraft) -> ValidationCheck:
 
 
 def _check_mobile_report_shape(draft: ResearchDraft) -> ValidationCheck:
+    mobile = draft.run_metadata.get("mobile_validation", {}) if draft.run_metadata else {}
+    ok = bool(mobile.get("passed") and mobile.get("screenshot_path"))
     return _check(
         "mobile_shape",
         "手机/电脑阅读",
         "投资备忘录版本应是 3–5 屏结论先行，并可在手机和电脑流畅阅读。",
-        False,
-        "当前仅有响应式 CSS，但未做真实移动端 3–5 屏信息密度验收。",
+        ok,
+        f"移动端截图验收 passed={bool(mobile.get('passed'))}；截图={mobile.get('screenshot_path') or '无'}。",
         "移动端截图验收通过，首屏结论先行。",
         "增加 Playwright/浏览器截图验收，输出移动端布局报告。",
     )
 
 
 def _check_async_task_queue(draft: ResearchDraft) -> ValidationCheck:
+    metadata = draft.run_metadata or {}
+    statuses = metadata.get("queue_statuses", [])
+    ok = len(statuses) >= 4 and metadata.get("job_id")
     return _check(
         "async_task_queue",
         "任务队列",
         "产品应是提交任务 → 进度页 → 完成通知/刷新。",
-        False,
-        "当前 Streamlit 原型仍为同步任务，只有进度条模拟。",
-        "真实后台队列、任务状态表、通知机制。",
-        "接入 Supabase job table + worker/RQ/Celery + 企业微信通知。",
+        bool(ok),
+        f"任务模式={metadata.get('task_mode', '未知')}；job_id={metadata.get('job_id') or '无'}；状态记录={len(statuses)} 个。",
+        "至少记录 job_id 和 submitted/collecting/model/validation 等任务状态；正式版需要真实后台 worker。",
+        "接入 Supabase job table + worker/RQ/Celery + 企业微信通知；当前仅为可审计同步原型。",
     )
 
 
 def _check_permissions_logging(draft: ResearchDraft) -> ValidationCheck:
+    permissions = (draft.run_metadata or {}).get("permissions", {})
+    ok = permissions.get("visibility") == "authorized" and permissions.get("user_id_required") and permissions.get("access_logs")
     return _check(
         "permissions_logging",
         "权限与行为日志",
         "报告对授权用户可见，并记录打开、证据点击、停留时间。",
-        False,
-        "仅预留 Supabase schema；未实现登录、授权校验和前端行为日志。",
-        "真实鉴权、报告权限、非匿名访问日志。",
-        "接入微信登录/管理员权限配置/前端埋点。",
+        bool(ok),
+        f"visibility={permissions.get('visibility', '无')}；user_id_required={bool(permissions.get('user_id_required'))}；access_logs={permissions.get('access_logs', '无')}。",
+        "报告元数据为 authorized，且记录非匿名 user_id 与访问/生成事件日志。",
+        "接入微信登录/管理员权限配置/前端埋点；当前为本地 JSONL 或 Supabase 日志原型。",
     )
 
 
