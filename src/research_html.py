@@ -87,6 +87,7 @@ def render_memo_html(draft: ResearchDraft) -> str:
         <h2>系统下一步自动验证计划</h2>
         <ol class="next-list">{''.join(f'<li>{_e(item)}</li>' for item in draft.next_fetch_plan)}</ol>
       </section>
+      {_reference_appendix(draft)}
       {_evidence_drawer(draft)}
     </main>
     """
@@ -141,6 +142,7 @@ def render_dashboard_html(draft: ResearchDraft) -> str:
         <h2>候选证据清单</h2>
         {_evidence_table(draft.evidence, company_lookup)}
       </section>
+      {_reference_appendix(draft)}
       {_evidence_drawer(draft)}
     </main>
     """
@@ -639,6 +641,142 @@ def _evidence_table(evidence: list[EvidenceItem], company_lookup: dict[str, str]
     return f"<div class='table-wrap'><table class='evidence-table'><thead><tr><th>#</th><th>公司</th><th>类型</th><th>置信层</th><th>来源</th><th>标题</th></tr></thead><tbody>{''.join(rows)}</tbody></table></div>"
 
 
+def _reference_appendix(draft: ResearchDraft) -> str:
+    rows = []
+    for index, item in enumerate(_deduped_reference_items(draft), start=1):
+        link_html = f'<a href="{_e(item["link"])}" target="_blank" rel="noreferrer">一键打开 ↗</a>' if item["link"] else '<span class="muted">暂无可打开链接</span>'
+        rows.append(
+            f"""
+            <tr>
+              <td>{index}</td>
+              <td>{_e(item["company"])}</td>
+              <td>{_e(_type_label(item["type"]))}</td>
+              <td>{_e(item["file_name"])}</td>
+              <td>{_e(item["source"])}</td>
+              <td>{link_html}</td>
+            </tr>
+            """
+        )
+    if not rows:
+        body = "<p class='muted'>本次研究尚未记录可打开的参考资料。</p>"
+    else:
+        body = f"""
+        <div class="table-wrap reference-wrap">
+          <table class="reference-table">
+            <thead><tr><th>#</th><th>公司</th><th>类型</th><th>文件名 / 资料名</th><th>来源</th><th>链接</th></tr></thead>
+            <tbody>{''.join(rows)}</tbody>
+          </table>
+        </div>
+        """
+    return f"""
+    <section class="section reference-appendix">
+      <div class="section-title">
+        <div>
+          <p class="eyebrow">References</p>
+          <h2>本次研究参考资料附录</h2>
+          <p>这里汇总本次研究查找、阅读或纳入证据审计的标的公司与可比公司资料；点击链接可一键打开原始网页、PDF 或本地截图/文件。</p>
+        </div>
+      </div>
+      {body}
+    </section>
+    """
+
+
+def _deduped_reference_items(draft_or_evidence: ResearchDraft | list[EvidenceItem]) -> list[dict[str, str]]:
+    if isinstance(draft_or_evidence, ResearchDraft):
+        return _deduped_reference_records(draft_or_evidence)
+    return _deduped_evidence_reference_records(draft_or_evidence, {})
+
+
+def _deduped_reference_records(draft: ResearchDraft) -> list[dict[str, str]]:
+    company_lookup = _draft_display_lookup(draft)
+    records = _deduped_evidence_reference_records(draft.evidence, company_lookup)
+    records.extend(_financial_reference_records(draft.financial_charts, company_lookup))
+    return _dedupe_reference_records(records)
+
+
+def _deduped_evidence_reference_records(evidence: list[EvidenceItem], company_lookup: dict[str, str]) -> list[dict[str, str]]:
+    seen: set[str] = set()
+    records: list[dict[str, str]] = []
+    for item in evidence:
+        key = (item.url or item.screenshot_path or f"{item.ticker}:{item.title}:{item.evidence_type}").strip().casefold()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        display_company = item.company or resolve_display_name(item.ticker, company_lookup)
+        display_title = replace_identifier_with_name(item.title or item.url, item.ticker, display_company)
+        records.append(
+            {
+                "company": display_company,
+                "type": item.evidence_type,
+                "file_name": _reference_file_name(item, display_title),
+                "source": item.source,
+                "link": _reference_link(item),
+                "period": item.period,
+                "title": display_title,
+            }
+        )
+    return sorted(records, key=_reference_sort_key)
+
+
+def _financial_reference_records(charts: list[FinancialChart], company_lookup: dict[str, str]) -> list[dict[str, str]]:
+    records: list[dict[str, str]] = []
+    for chart in charts:
+        for point in chart.points:
+            display_company = point.company or resolve_display_name(point.ticker, company_lookup)
+            for source in point.sources:
+                title = source.title or source.form or chart.title or point.metric_label
+                concept = f" · {source.concept}" if source.concept else ""
+                period = point.period or source.filed
+                file_name = f"{display_company} {point.metric_label} {period}{concept}".strip()
+                records.append(
+                    {
+                        "company": display_company,
+                        "type": "financial_datapoint",
+                        "file_name": file_name or title,
+                        "source": title,
+                        "link": source.url,
+                        "period": period,
+                        "title": chart.title,
+                    }
+                )
+    return records
+
+
+def _dedupe_reference_records(records: list[dict[str, str]]) -> list[dict[str, str]]:
+    seen: set[str] = set()
+    deduped: list[dict[str, str]] = []
+    for item in records:
+        key = (item.get("link") or f'{item.get("company")}:{item.get("type")}:{item.get("file_name")}').strip().casefold()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        deduped.append(item)
+    return sorted(deduped, key=_reference_sort_key)
+
+
+def _reference_sort_key(item: dict[str, str]) -> tuple[str, str, str, str]:
+    return (item.get("company") or "", item.get("type") or "", item.get("period") or "", item.get("file_name") or item.get("title") or "")
+
+
+def _reference_file_name(item: EvidenceItem, display_title: str) -> str:
+    if item.screenshot_path:
+        return Path(item.screenshot_path).name
+    if item.url:
+        path_name = Path(item.url.split("?", 1)[0].rstrip("/")).name
+        if path_name and "." in path_name:
+            return path_name
+    return display_title or item.title or item.url or "未命名资料"
+
+
+def _reference_link(item: EvidenceItem) -> str:
+    if item.url:
+        return item.url
+    if item.screenshot_path:
+        return _local_path_to_uri(item.screenshot_path)
+    return ""
+
+
 def _evidence_drawer(draft: ResearchDraft) -> str:
     return """
     <aside id="evidenceDrawer" class="drawer">
@@ -713,6 +851,7 @@ def _style() -> str:
     .signal-card button,.audit button,.drawer-head button{border:0;background:var(--ink);color:#fff;border-radius:12px;padding:9px 12px;font-weight:700;cursor:pointer}.mini-list,.next-list{color:#42526b}.two-col{display:grid;grid-template-columns:1.1fr .9fr;gap:22px}
     .group-list,.audit-list{display:grid;gap:12px}.group-card,.audit{padding:16px}.group-card h3,.audit strong{margin:0 0 8px;display:block}.group-card p,.group-card small,.audit p{color:var(--muted)}.pill-row{display:flex;gap:7px;flex-wrap:wrap;margin-top:12px}
     .audit{position:relative}.audit span{position:absolute;right:16px;top:16px;font-size:12px;color:var(--muted)}.table-wrap{overflow:auto;background:#fff;border:1px solid var(--line);border-radius:20px;box-shadow:var(--shadow)}table{border-collapse:collapse;width:100%;min-width:760px}th,td{padding:12px;border-bottom:1px solid var(--line);text-align:left;font-size:14px}th{background:#f2f6fb;color:#42526b}tr{transition:.15s background}tbody tr:hover{background:#f8fbff}
+    .reference-appendix .section-title p:not(.eyebrow){color:var(--muted);margin-top:0}.reference-table td:nth-child(4){font-weight:700;color:#203047}.reference-table a{color:var(--blue);font-weight:800;text-decoration:none;white-space:nowrap}.reference-wrap{margin-top:14px}
     .heat{min-width:42px;border:0;border-radius:10px;padding:8px 10px;cursor:pointer;background:#f1f5f9;color:#334155}.h1{background:#e0f2fe}.h2{background:#bae6fd}.h3{background:#7dd3fc}.h4{background:#38bdf8;color:#072638}
     .drawer{position:fixed;right:0;top:0;width:min(520px,94vw);height:100vh;background:#fff;box-shadow:-20px 0 60px rgba(16,32,51,.18);transform:translateX(105%);transition:.22s transform;z-index:10;padding:20px;overflow:auto}.drawer.open{transform:translateX(0)}.drawer-head{display:flex;justify-content:space-between;gap:14px;align-items:center;border-bottom:1px solid var(--line);padding-bottom:14px;margin-bottom:14px}.drawer-head h2{margin:0}.drawer-card{border:1px solid var(--line);border-radius:18px;padding:14px;margin-bottom:12px;background:#fbfdff}.drawer-card h3{font-size:17px;margin:6px 0}.drawer-meta,.muted{color:var(--muted);font-size:13px}.drawer-card a{color:var(--blue);font-weight:800;text-decoration:none}.source-row{border-top:1px solid var(--line);padding-top:10px;margin-top:10px}.source-row p{margin:4px 0;color:var(--muted);font-size:13px}.source-shot{margin:12px 0;border:1px solid var(--line);border-radius:14px;overflow:hidden;background:#f8fafc}.source-shot img{display:block;width:100%;height:auto}.source-shot figcaption{padding:8px 10px;color:var(--muted);font-size:12px}blockquote{margin:10px 0;padding:10px 12px;background:#f6f8fb;border-left:4px solid var(--blue);border-radius:10px}
     details{background:#f8fafc;border-radius:14px;padding:10px 12px;margin:12px 0}summary{cursor:pointer;font-weight:800}@media(max-width:820px){.hero,.two-col,.grid-3,.signal-grid,.chart-grid,.anomaly-columns{grid-template-columns:1fr}.section-title{display:block}.memo-shell,.dashboard-shell{padding:18px 12px 50px}.hero h1{font-size:34px}.drawer{width:100vw}.bar-item{min-width:64px}}
