@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from typing import Any
 
 import streamlit as st
+
+for _module_name in list(sys.modules):
+    if _module_name.startswith("src.research_") or _module_name == "src.wind_client":
+        sys.modules.pop(_module_name, None)
 
 from src.research_anomalies import POSITIVE, RISK
 from src.research_html import save_dashboard_html, save_memo_html
