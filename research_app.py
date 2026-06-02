@@ -12,6 +12,7 @@ for _module_name in list(sys.modules):
         sys.modules.pop(_module_name, None)
 
 from src.research_anomalies import POSITIVE, RISK
+from src.research_display import company_display_name, display_name_lookup, point_display_name, replace_identifier_with_name, resolve_display_name
 from src.research_html import save_dashboard_html, save_memo_html
 from src.research_llm import deepseek_key_status
 from src.research_pipeline import collect_research_draft, run_deep_analysis_for_selected_anomalies
@@ -143,10 +144,10 @@ def render_comparable_editor() -> list[Any]:
             for index, company in enumerate(group.companies):
                 with cols[index % 3]:
                     checked = st.checkbox(
-                        f"{company.ticker} · {company.name}",
+                        company_display_name(company),
                         value=True,
                         key=f"group_{group.group_id}_{company.ticker}",
-                        help=company.description,
+                        help=f"{company.description}\n\n内部标识：{company.ticker}",
                     )
                 if checked:
                     selected.append(company.ticker)
@@ -162,7 +163,7 @@ def render_comparable_editor() -> list[Any]:
     selected_groups = build_selected_groups(st.session_state.base_groups, selected_by_group, extras)
     st.session_state.selected_groups = selected_groups
     with st.container(border=True):
-        st.markdown(f"**目标公司：** {target.ticker} · {target.name}")
+        st.markdown(f"**目标公司：** {company_display_name(target)}")
         st.markdown(f"**当前纳入：** {sum(len(group.companies) for group in selected_groups)} 个可比 / 交叉验证对象，{len(selected_groups)} 个分组")
     return selected_groups
 
@@ -263,7 +264,7 @@ def render_draft_review(user_id: str, deepseek_api_key: str) -> None:
                 for point in chart.points:
                     rows.append(
                         {
-                            "ticker": point.ticker,
+                            "company": point_display_name(point),
                             "period": point.period,
                             "end_date": point.end_date,
                             "metric": point.metric_label,
@@ -294,11 +295,11 @@ def render_draft_review(user_id: str, deepseek_api_key: str) -> None:
     with tab_evidence:
         rows = [
             {
-                "ticker": item.ticker,
+                "company": item.company or _display_name_for_ticker(item.ticker),
                 "type": item.evidence_type,
                 "period": item.period,
                 "source": item.source,
-                "title": item.title,
+                "title": replace_identifier_with_name(item.title, item.ticker, item.company or _display_name_for_ticker(item.ticker)),
                 "url": item.url,
                 "confidence": item.confidence_tier,
                 "quote": item.quote,
@@ -428,6 +429,16 @@ def _compact_cell(value: str, limit: int = 240) -> str:
     return value[: limit - 3] + "..."
 
 
+def _display_name_for_ticker(ticker: str) -> str:
+    draft = st.session_state.get("research_draft")
+    if not ticker:
+        return ""
+    if not draft:
+        return resolve_display_name(ticker)
+    lookup = display_name_lookup([draft.target, *[company for group in draft.comparable_groups for company in group.companies]])
+    return resolve_display_name(ticker, lookup)
+
+
 def _render_anomaly_group(prefix: str, anomalies: list[Any]) -> list[str]:
     if not anomalies:
         st.info("暂无此类异常。")
@@ -454,7 +465,8 @@ def _render_anomaly_group(prefix: str, anomalies: list[Any]) -> list[str]:
             st.markdown(f"**对比依据：** {anomaly.comparison_basis}")
             if anomaly.magnitude:
                 st.markdown(f"**幅度：** {anomaly.magnitude}")
-            st.caption(f"{anomaly.category} · {anomaly.ticker or '多公司/资料'} · {anomaly.period or '当前窗口'} · 置信度：{anomaly.confidence_tier}")
+            company_name = _display_name_for_ticker(anomaly.ticker) or "多公司/资料"
+            st.caption(f"{anomaly.category} · {company_name} · {anomaly.period or '当前窗口'} · 置信度：{anomaly.confidence_tier}")
             if anomaly.suggested_deep_dive:
                 st.info(f"建议深挖：{anomaly.suggested_deep_dive}")
             if anomaly.source_refs:

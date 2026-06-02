@@ -6,6 +6,7 @@ from statistics import median
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from .research_display import point_display_name
 from .research_models import EvidenceItem, FinancialChart
 
 try:
@@ -101,12 +102,13 @@ def _financial_trend_anomalies(charts: list[FinancialChart]) -> list[ObjectiveAn
         if abs(change) < threshold:
             continue
         polarity = _trend_polarity(last.metric, change)
+        company_name = point_display_name(last)
         anomalies.append(
             ObjectiveAnomaly(
                 anomaly_id=f"trend:{chart.chart_id}:{last.ticker}:{last.metric}",
                 polarity=polarity,
                 category="纵向变化",
-                title=f"{last.ticker} {last.metric_label} 连续窗口显著{'上升' if change >= 0 else '下降'}",
+                title=f"{company_name} {last.metric_label} 连续窗口显著{'上升' if change >= 0 else '下降'}",
                 observation=f"{last.metric_label} 从 {first.period} 的 {first.display_value} 变化至 {last.period} 的 {last.display_value}。",
                 comparison_basis=f"目标公司自身最近 {len(points)} 个季度纵向对比。",
                 magnitude=f"{change:+.1f}%",
@@ -139,12 +141,13 @@ def _peer_rank_anomalies(charts: list[FinancialChart]) -> list[ObjectiveAnomaly]
             if abs(diff) < _peer_threshold(point.metric):
                 continue
             polarity = _peer_polarity(point.metric, rank_label)
+            company_name = point_display_name(point)
             anomalies.append(
                 ObjectiveAnomaly(
                     anomaly_id=f"peer:{chart.chart_id}:{point.ticker}:{point.metric}:{rank_label}",
                     polarity=polarity,
                     category="横向对比",
-                    title=f"{point.ticker} {point.metric_label} 在可比组中{rank_label}",
+                    title=f"{company_name} {point.metric_label} 在可比组中{rank_label}",
                     observation=f"{point.period} 的 {point.metric_label} 为 {point.display_value}，在本组 {len(points)} 家公司中排名{rank_label}。",
                     comparison_basis=f"与同一可比组最新可得季度中位数对比。",
                     magnitude=f"较中位数 {diff:+.1f}%",

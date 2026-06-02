@@ -8,6 +8,7 @@ from typing import Any
 
 import requests
 
+from .research_display import company_display_name, point_display_name
 from .research_models import CompanyProfile, FinancialChart, FinancialDataPoint, FinancialSource
 from .utils import request_json
 from .wind_client import WIND_SOURCE_NOTE, is_wind_available, normalize_windcode, parse_wind_tables, wind_financial_query, wind_rows_by_column, wind_units_by_column
@@ -104,6 +105,7 @@ def build_financial_charts(
         return charts, notes
 
     target = target or companies[0]
+    target_name = company_display_name(target)
     target_series = all_series.get(_company_series_key(target), {})
     if not target_series:
         notes.append(
@@ -114,12 +116,12 @@ def build_financial_charts(
         charts.append(
             FinancialChart(
                 chart_id="target_revenue_trend",
-                title=f"{target.ticker} quarterly revenue trend",
+                title=f"{target_name} Revenue trend",
                 subtitle=_source_subtitle(revenue_points, "Latest quarters from audited filings / Wind fundamentals; click any point to inspect source metadata."),
                 chart_type="bar_line",
                 y_axis=_axis_label(revenue_points),
                 points=revenue_points,
-                insight=_trend_insight(target.ticker, "revenue", revenue_points),
+                insight=_trend_insight(target_name, "revenue", revenue_points),
                 source_note=_source_note_for_points(revenue_points),
             )
         )
@@ -130,12 +132,12 @@ def build_financial_charts(
             charts.append(
                 FinancialChart(
                     chart_id=f"target_{supplemental_metric}",
-                    title=f"{target.ticker} {METRIC_LABELS.get(supplemental_metric, supplemental_metric)} trend",
+                    title=f"{target_name} {METRIC_LABELS.get(supplemental_metric, supplemental_metric)} trend",
                     subtitle=_source_subtitle(points, "Latest reported periods from filings / Wind fundamentals; click any point to inspect source metadata."),
                     chart_type="line" if supplemental_metric in {"inventory", "construction_in_progress"} else "bar_line",
                     y_axis=_axis_label(points),
                     points=points,
-                    insight=_trend_insight(target.ticker, supplemental_metric, points),
+                    insight=_trend_insight(target_name, supplemental_metric, points),
                     source_note=_source_note_for_points(points),
                 )
             )
@@ -146,12 +148,12 @@ def build_financial_charts(
             charts.append(
                 FinancialChart(
                     chart_id=f"target_{margin_metric}",
-                    title=f"{target.ticker} {METRIC_LABELS[margin_metric]}",
+                    title=f"{target_name} {METRIC_LABELS[margin_metric]}",
                     subtitle=_source_subtitle(points, "Derived from reported income statement fields; source links remain attached to the underlying metrics."),
                     chart_type="line",
                     y_axis="%",
                     points=points,
-                    insight=_trend_insight(target.ticker, margin_metric, points),
+                    insight=_trend_insight(target_name, margin_metric, points),
                     source_note=_source_note_for_points(points),
                 )
             )
@@ -161,7 +163,7 @@ def build_financial_charts(
         charts.append(
             FinancialChart(
                 chart_id="peer_latest_revenue",
-                title="Latest reported revenue: target vs selected public comparables",
+                title="Latest reported revenue: target company vs selected public comparables",
                 subtitle="Cross-sectional view over companies with available SEC XBRL or Wind fundamentals data in this prototype.",
                 chart_type="bar",
                 y_axis=_axis_label(peer_revenue),
@@ -176,7 +178,7 @@ def build_financial_charts(
         charts.append(
             FinancialChart(
                 chart_id="peer_latest_gross_margin",
-                title="Latest gross margin: target vs selected public comparables",
+                title="Latest gross margin: target company vs selected public comparables",
                 subtitle="Gross margin is calculated or directly sourced for the same reported period where available.",
                 chart_type="bar",
                 y_axis="%",
@@ -191,7 +193,7 @@ def build_financial_charts(
         charts.append(
             FinancialChart(
                 chart_id="peer_latest_operating_margin",
-                title="Latest operating margin: target vs selected public comparables",
+                title="Latest operating margin: target company vs selected public comparables",
                 subtitle="Operating margin is calculated as operating income divided by revenue for the same reported period where available.",
                 chart_type="bar",
                 y_axis="%",
@@ -206,7 +208,7 @@ def build_financial_charts(
             charts.append(
                 FinancialChart(
                     chart_id=f"peer_latest_{peer_metric}",
-                    title=f"Latest {METRIC_LABELS[peer_metric]}: target vs selected public comparables",
+                    title=f"Latest {METRIC_LABELS[peer_metric]}: target company vs selected public comparables",
                     subtitle=f"{METRIC_LABELS[peer_metric]} is calculated from reported quarterly financial fields where available.",
                     chart_type="bar",
                     y_axis="%",
@@ -350,7 +352,7 @@ def _extract_cninfo_points_from_pdf(company: CompanyProfile, filing: dict[str, A
         if metric in {"gross_profit", "operating_income", "rd_expense"} and period_info["kind"] in {"h1", "annual"}:
             continue
         source = FinancialSource(
-            title=f"{company.ticker} 巨潮公告 {title}",
+            title=f"{company_display_name(company)} 巨潮公告 {title}",
             url=url,
             accession="CNINFO",
             form=str(filing.get("form") or ""),
@@ -434,7 +436,7 @@ def _extract_annual_quarter_points(
             continue
         for quarter, value in zip(["Q1", "Q2", "Q3", "Q4"], values[:4]):
             source = FinancialSource(
-                title=f"{company.ticker} 巨潮公告 {filing.get('title') or ''}",
+                title=f"{company_display_name(company)} 巨潮公告 {filing.get('title') or ''}",
                 url=str(filing.get("url") or ""),
                 accession="CNINFO",
                 form=str(filing.get("form") or ""),
@@ -918,7 +920,7 @@ def _quarter_end_date(period: str) -> str:
 
 def _wind_source(company: CompanyProfile, windcode: str, period: str, column: str, unit: str) -> FinancialSource:
     return FinancialSource(
-        title=f"{company.ticker} Wind fundamentals {period}",
+        title=f"{company_display_name(company)} Wind fundamentals {period}",
         url="https://aifinmarket.wind.com.cn",
         accession="Wind MCP",
         form="Wind fundamentals",
@@ -1299,7 +1301,7 @@ def _source_for_item(company: CompanyProfile, item: dict[str, Any], concept: str
     accession_clean = accession.replace("-", "")
     url = f"https://www.sec.gov/Archives/edgar/data/{cik_int}/{accession_clean}/{accession}-index.html" if accession and cik_int else ""
     return FinancialSource(
-        title=f"{company.ticker} {item.get('form', '')} filed {item.get('filed', '')}",
+        title=f"{company_display_name(company)} {item.get('form', '')} filed {item.get('filed', '')}",
         url=url,
         accession=accession,
         form=str(item.get("form") or ""),
@@ -1337,4 +1339,4 @@ def _peer_insight(metric: str, points: list[FinancialDataPoint]) -> str:
         return ""
     leader = points[0]
     laggard = points[-1]
-    return f"{leader.ticker} is highest on latest available {METRIC_LABELS.get(metric, metric)} ({leader.display_value}); {laggard.ticker} is lowest ({laggard.display_value})."
+    return f"{point_display_name(leader)} is highest on latest available {METRIC_LABELS.get(metric, metric)} ({leader.display_value}); {point_display_name(laggard)} is lowest ({laggard.display_value})."

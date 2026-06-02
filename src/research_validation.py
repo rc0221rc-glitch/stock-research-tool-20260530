@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import Counter
 
 from .research_anomalies import POSITIVE, RISK
+from .research_display import company_display_name
 from .research_models import ResearchDraft, ValidationCheck, ValidationReport
 
 
@@ -188,8 +189,8 @@ def _check_target_chart_identity(draft: ResearchDraft) -> ValidationCheck:
         "目标公司图表身份",
         "目标公司纵向财务图表只能包含目标公司自己的数据点，绝不能用同行数据兜底或串号。",
         not mismatches,
-        f"目标 ticker={target_ticker or '无'}；目标图表 {len(target_charts)} 个；串号={'; '.join(mismatches) or '无'}。",
-        "所有 chart_id 以 target_ 开头的图表，其每个数据点 ticker 必须等于目标公司 ticker。",
+        f"目标公司={company_display_name(draft.target)}；目标图表 {len(target_charts)} 个；串号={'; '.join(mismatches) or '无'}。",
+        "所有 chart_id 以 target_ 开头的图表，其每个数据点必须属于目标公司；内部 ticker 仅用于校验和溯源。",
         "停止用同行数据替代目标公司缺失数据；缺失时宁可不生成目标图表，并在运行日志里说明。",
     )
 

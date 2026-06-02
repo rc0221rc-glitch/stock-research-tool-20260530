@@ -4,6 +4,7 @@ from typing import Any
 from urllib.parse import quote_plus
 
 from .private_company_sources import find_private_company_evidence
+from .research_display import company_display_name
 from .research_models import CompanyProfile, ComparableGroup, EvidenceItem, FinancialChart
 from .utils import LinkResult, dedupe_links, search_url
 
@@ -200,7 +201,7 @@ def _search_entry_evidence(companies: list[CompanyProfile], years: list[str], qu
                 query = f"{company.name} {company.ticker} {periods} {suffix}".strip()
                 items.append(
                     EvidenceItem(
-                        title=f"{company.ticker} 定向搜索：{suffix}",
+                        title=f"{company_display_name(company)} 定向搜索：{suffix}",
                         url=search_url(query),
                         source="定向搜索入口",
                         company=company.name,
@@ -248,7 +249,7 @@ def _ensure_minimum_type_coverage(evidence: list[EvidenceItem], target: CompanyP
             query = f"{target.name} {target.ticker} {periods} {_kind_query_suffix(kind)} {counters[kind] + 1}".strip()
             evidence.append(
                 EvidenceItem(
-                    title=f"{target.ticker} 补充搜索入口：{_kind_label(kind)} #{counters[kind] + 1}",
+                    title=f"{company_display_name(target)} 补充搜索入口：{_kind_label(kind)} #{counters[kind] + 1}",
                     url=search_url(query),
                     source="证据覆盖守门员",
                     company=target.name,

@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from .research_anomalies import POSITIVE, RISK
+from .research_display import company_display_name, display_name_lookup, point_display_name, replace_identifier_with_name, resolve_display_name
 from .research_models import EvidenceItem, FinancialChart, FinancialDataPoint, ResearchDraft, ResearchSignal
 from .research_validation import validate_research_draft
 from .utils import clean_filename
@@ -66,7 +67,7 @@ def render_memo_html(draft: ResearchDraft) -> str:
           <h2>基于已勾选异常生成的核心信号</h2>
         </div>
         <div class="signal-list">
-          {''.join(_signal_card(signal, draft.evidence, compact=True) for signal in draft.signals)}
+          {''.join(_signal_card(signal, draft.evidence, compact=True, anomaly_lookup=_anomaly_title_lookup(draft)) for signal in draft.signals)}
         </div>
       </section>
       <section class="section two-col">
@@ -93,6 +94,7 @@ def render_memo_html(draft: ResearchDraft) -> str:
 
 
 def render_dashboard_html(draft: ResearchDraft) -> str:
+    company_lookup = _draft_display_lookup(draft)
     content = f"""
     <main class="dashboard-shell">
       {_hero(draft, "交互式研究看板草稿", "信号卡片、证据矩阵、可比组与审计附录版本。点击信号或证据可打开右侧来源抽屉。")}
@@ -119,7 +121,7 @@ def render_dashboard_html(draft: ResearchDraft) -> str:
           <h2>基于用户勾选异常的深度分析信号</h2>
         </div>
         <div class="signal-grid">
-          {''.join(_signal_card(signal, draft.evidence, compact=False) for signal in draft.signals)}
+          {''.join(_signal_card(signal, draft.evidence, compact=False, anomaly_lookup=_anomaly_title_lookup(draft)) for signal in draft.signals)}
         </div>
       </section>
       <section class="section two-col">
@@ -137,7 +139,7 @@ def render_dashboard_html(draft: ResearchDraft) -> str:
       <section class="section">
         <p class="eyebrow">候选证据</p>
         <h2>候选证据清单</h2>
-        {_evidence_table(draft.evidence)}
+        {_evidence_table(draft.evidence, company_lookup)}
       </section>
       {_evidence_drawer(draft)}
     </main>
@@ -146,8 +148,9 @@ def render_dashboard_html(draft: ResearchDraft) -> str:
 
 
 def _document(title: str, content: str, draft: ResearchDraft) -> str:
-    evidence_json = json.dumps([_evidence_payload(item) for item in draft.evidence], ensure_ascii=False)
-    financial_json = json.dumps([chart.to_dict() for chart in draft.financial_charts], ensure_ascii=False)
+    company_lookup = _draft_display_lookup(draft)
+    evidence_json = json.dumps([_evidence_payload(item, company_lookup) for item in draft.evidence], ensure_ascii=False)
+    financial_json = json.dumps([_chart_payload(chart) for chart in draft.financial_charts], ensure_ascii=False)
     return f"""<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -167,8 +170,8 @@ def _document(title: str, content: str, draft: ResearchDraft) -> str:
       const list = (ids || []).map(id => evidence[id]).filter(Boolean);
       body.innerHTML = list.length ? list.map((item, offset) => `
         <article class="drawer-card">
-          <div class="drawer-meta">${{item.ticker || ''}} · ${{item.evidence_type || ''}} · ${{item.confidence_tier || ''}}</div>
-          <h3>${{escapeHtml(item.title || item.url || 'Untitled')}}</h3>
+          <div class="drawer-meta">${{item.display_company || item.company || item.ticker || ''}} · ${{item.evidence_type || ''}} · ${{item.confidence_tier || ''}}</div>
+          <h3>${{escapeHtml(item.display_title || item.title || item.url || 'Untitled')}}</h3>
           <p>${{escapeHtml(item.confidence_reason || '')}}</p>
           ${{item.quote ? `<blockquote>${{escapeHtml(item.quote)}}</blockquote>` : ''}}
           ${{item.page ? `<p>页码：${{escapeHtml(item.page)}}</p>` : ''}}
@@ -192,7 +195,7 @@ def _document(title: str, content: str, draft: ResearchDraft) -> str:
       const sources = point.sources || [];
       body.innerHTML = `
         <article class="drawer-card">
-          <div class="drawer-meta">${{escapeHtml(point.ticker)}} · ${{escapeHtml(point.metric_label)}} · ${{escapeHtml(point.period)}}</div>
+          <div class="drawer-meta">${{escapeHtml(point.display_company || point.company || point.ticker)}} · ${{escapeHtml(point.metric_label)}} · ${{escapeHtml(point.period)}}</div>
           <h3>${{escapeHtml(point.display_value)}}</h3>
           <p>指标：${{escapeHtml(point.metric_label)}}；期间：${{escapeHtml(point.period)}}；截至日：${{escapeHtml(point.end_date)}}。</p>
           <p class="muted">${{escapeHtml(chart.source_note || '数据来自 SEC XBRL / Wind fundamentals。当前已能追溯到 filing accession 或 Wind 字段；下一阶段会继续定位到具体表格、页码和截图。')}}</p>
@@ -219,9 +222,24 @@ def _document(title: str, content: str, draft: ResearchDraft) -> str:
 </html>"""
 
 
-def _evidence_payload(item: EvidenceItem) -> dict[str, Any]:
+def _draft_display_lookup(draft: ResearchDraft) -> dict[str, str]:
+    return display_name_lookup([draft.target, *[company for group in draft.comparable_groups for company in group.companies]])
+
+
+def _chart_payload(chart: FinancialChart) -> dict[str, Any]:
+    data = chart.to_dict()
+    for point in data.get("points", []):
+        point["display_company"] = point.get("company") or point.get("ticker") or ""
+    return data
+
+
+def _evidence_payload(item: EvidenceItem, company_lookup: dict[str, str] | None = None) -> dict[str, Any]:
     data = item.to_dict()
     data["screenshot_uri"] = _local_path_to_uri(item.screenshot_path)
+    display_company = item.company or resolve_display_name(item.ticker, company_lookup)
+    data["display_company"] = display_company
+    data["display_title"] = replace_identifier_with_name(item.title, item.ticker, display_company)
+    data["title"] = data["display_title"]
     return data
 
 
@@ -239,11 +257,11 @@ def _hero(draft: ResearchDraft, label: str, subtitle: str) -> str:
     <section class="hero">
       <div>
         <p class="eyebrow">{_e(label)}</p>
-        <h1>{_e(draft.target.name)} · AI 产业链研究草稿</h1>
+        <h1>{_e(company_display_name(draft.target))} · AI 产业链研究草稿</h1>
         <p class="hero-subtitle">{_e(subtitle)}</p>
       </div>
       <div class="hero-card">
-        <span>目标公司</span><strong>{_e(draft.target.ticker or draft.target.name)}</strong>
+        <span>目标公司</span><strong>{_e(company_display_name(draft.target))}</strong>
         <span>观察窗口</span><strong>最近 {draft.quarter_count} 个季度</strong>
         <span>生成时间</span><strong>{_e(draft.generated_at)}</strong>
         <span>报告状态</span><strong>{_e(draft.report_label)}</strong>
@@ -449,7 +467,7 @@ def _bar_chart(chart: FinancialChart, chart_index: int) -> str:
               <span class="bar-value">{_e(point.display_value)}</span>
               <i style="height:{height}%"></i>
               <em>{_e(_short_period(point))}</em>
-              <small>{_e(point.ticker)}</small>
+              <small>{_e(point_display_name(point))}</small>
             </button>
             """
         )
@@ -497,7 +515,7 @@ def _line_chart(chart: FinancialChart, chart_index: int) -> str:
     """
 
 
-def _signal_card(signal: ResearchSignal, evidence: list[EvidenceItem], compact: bool) -> str:
+def _signal_card(signal: ResearchSignal, evidence: list[EvidenceItem], compact: bool, anomaly_lookup: dict[str, str] | None = None) -> str:
     evidence_ids = [idx for idx in signal.evidence_ids if 0 <= idx < len(evidence)]
     button = f"onclick='showEvidence({json.dumps(evidence_ids)})'"
     status_label = {
@@ -525,7 +543,7 @@ def _signal_card(signal: ResearchSignal, evidence: list[EvidenceItem], compact: 
         <span class="status">{_e(status_label)}</span>
       </div>
       <h3>{_e(signal.title)}</h3>
-      {_signal_anomaly_refs(signal)}
+      {_signal_anomaly_refs(signal, anomaly_lookup)}
       <p>{_e(signal.conclusion)}</p>
       <div class="chart-hint">
         <strong>{_e(signal.chart_hint)}</strong>
@@ -540,24 +558,28 @@ def _signal_card(signal: ResearchSignal, evidence: list[EvidenceItem], compact: 
     """
 
 
-def _signal_anomaly_refs(signal: ResearchSignal) -> str:
+def _anomaly_title_lookup(draft: ResearchDraft) -> dict[str, str]:
+    return {anomaly.anomaly_id: anomaly.title for anomaly in draft.objective_anomalies}
+
+
+def _signal_anomaly_refs(signal: ResearchSignal, anomaly_lookup: dict[str, str] | None = None) -> str:
     if not signal.anomaly_ids:
         return ""
-    labels = "".join(f"<span>{_e(item)}</span>" for item in signal.anomaly_ids[:4])
+    labels = "".join(f"<span>{_e((anomaly_lookup or {}).get(item, item))}</span>" for item in signal.anomaly_ids[:4])
     return f"<div class='pill-row anomaly-ref'><strong>对应异常：</strong>{labels}</div>"
 
 
 def _groups_html(draft: ResearchDraft) -> str:
     cards = []
     for group in draft.comparable_groups:
-        companies = "、".join(company.ticker for company in group.companies)
+        companies = "、".join(company_display_name(company) for company in group.companies)
         cards.append(
             f"""
             <article class="group-card">
               <h3>{_e(group.title)}</h3>
               <p>{_e(group.purpose)}</p>
               <small>{_e(group.selection_logic)}</small>
-              <div class="pill-row">{''.join(f'<span>{_e(company.ticker)}</span>' for company in group.companies)}</div>
+              <div class="pill-row">{''.join(f'<span>{_e(company_display_name(company))}</span>' for company in group.companies)}</div>
               <p class="muted">{_e(companies)}</p>
             </article>
             """
@@ -594,23 +616,23 @@ def _coverage_matrix(draft: ResearchDraft) -> str:
             ids = [idx for idx, item in enumerate(draft.evidence) if item.ticker.upper() == key and item.evidence_type == evidence_type]
             intensity = min(4, len(ids))
             cells.append(f"<td><button class='heat h{intensity}' onclick='showEvidence({json.dumps(ids[:12])})'>{len(ids)}</button></td>")
-        rows.append(f"<tr><th>{_e(company.ticker)}</th>{''.join(cells)}</tr>")
+        rows.append(f"<tr><th>{_e(company_display_name(company))}</th>{''.join(cells)}</tr>")
     header = "".join(f"<th>{_e(_type_label(item))}</th>" for item in types)
     return f"<div class='table-wrap'><table class='matrix'><thead><tr><th>公司</th>{header}</tr></thead><tbody>{''.join(rows)}</tbody></table></div>"
 
 
-def _evidence_table(evidence: list[EvidenceItem]) -> str:
+def _evidence_table(evidence: list[EvidenceItem], company_lookup: dict[str, str] | None = None) -> str:
     rows = []
     for idx, item in enumerate(evidence[:80]):
         rows.append(
             f"""
             <tr onclick='showEvidence([{idx}])'>
               <td>{idx + 1}</td>
-              <td>{_e(item.ticker)}</td>
+              <td>{_e(item.company or resolve_display_name(item.ticker, company_lookup))}</td>
               <td>{_e(_type_label(item.evidence_type))}</td>
               <td>{_e(item.confidence_tier)}</td>
               <td>{_e(item.source)}</td>
-              <td>{_e(item.title)}</td>
+              <td>{_e(replace_identifier_with_name(item.title, item.ticker, item.company or resolve_display_name(item.ticker, company_lookup)))}</td>
             </tr>
             """
         )
