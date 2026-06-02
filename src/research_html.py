@@ -236,8 +236,21 @@ def _document(title: str, content: str, draft: ResearchDraft) -> str:
 </html>"""
 
 
-def _draft_display_lookup(draft: ResearchDraft) -> dict[str, str]:
-    return display_name_lookup([draft.target, *[company for group in draft.comparable_groups for company in group.companies]])
+def _draft_display_lookup(draft: ResearchDraft | dict[str, Any]) -> dict[str, str]:
+    target = _draft_attr(draft, "target", None)
+    groups = _draft_attr(draft, "comparable_groups", []) or []
+    companies = [target] if target else []
+    for group in groups:
+        companies.extend(_item_attr(group, "companies", []) or [])
+    lookup: dict[str, str] = {}
+    for company in companies:
+        ticker = str(_item_attr(company, "ticker", "") or "").upper()
+        name = str(_item_attr(company, "name", "") or "").strip()
+        if ticker:
+            lookup[ticker] = name or resolve_display_name(ticker)
+    if lookup:
+        return lookup
+    return display_name_lookup(companies)
 
 
 def _chart_payload(chart: FinancialChart) -> dict[str, Any]:
@@ -845,61 +858,86 @@ def _reference_appendix(draft: ResearchDraft) -> str:
 
 
 def _deduped_reference_items(draft_or_evidence: ResearchDraft | list[EvidenceItem]) -> list[dict[str, str]]:
-    if isinstance(draft_or_evidence, ResearchDraft):
+    if _looks_like_research_draft(draft_or_evidence):
         return _deduped_reference_records(draft_or_evidence)
-    return _deduped_evidence_reference_records(draft_or_evidence, {})
+    if isinstance(draft_or_evidence, dict):
+        return _deduped_reference_records(draft_or_evidence)
+    return _deduped_evidence_reference_records(draft_or_evidence or [], {})
 
 
-def _deduped_reference_records(draft: ResearchDraft) -> list[dict[str, str]]:
+def _looks_like_research_draft(value: object) -> bool:
+    return all(hasattr(value, attr) for attr in ("evidence", "financial_charts", "target", "comparable_groups"))
+
+
+def _deduped_reference_records(draft: ResearchDraft | dict[str, Any]) -> list[dict[str, str]]:
     company_lookup = _draft_display_lookup(draft)
-    records = _deduped_evidence_reference_records(draft.evidence, company_lookup)
-    records.extend(_financial_reference_records(draft.financial_charts, company_lookup))
+    records = _deduped_evidence_reference_records(_draft_attr(draft, "evidence", []), company_lookup)
+    records.extend(_financial_reference_records(_draft_attr(draft, "financial_charts", []), company_lookup))
     return _dedupe_reference_records(records)
 
 
-def _deduped_evidence_reference_records(evidence: list[EvidenceItem], company_lookup: dict[str, str]) -> list[dict[str, str]]:
+def _draft_attr(draft: ResearchDraft | dict[str, Any], key: str, default: Any = None) -> Any:
+    if isinstance(draft, dict):
+        return draft.get(key, default)
+    return getattr(draft, key, default)
+
+
+def _item_attr(item: Any, key: str, default: Any = "") -> Any:
+    if isinstance(item, dict):
+        return item.get(key, default)
+    return getattr(item, key, default)
+
+
+def _deduped_evidence_reference_records(evidence: Any, company_lookup: dict[str, str]) -> list[dict[str, str]]:
     seen: set[str] = set()
     records: list[dict[str, str]] = []
-    for item in evidence:
-        key = (item.url or item.screenshot_path or f"{item.ticker}:{item.title}:{item.evidence_type}").strip().casefold()
+    for item in evidence or []:
+        url = str(_item_attr(item, "url", "") or "")
+        screenshot_path = str(_item_attr(item, "screenshot_path", "") or "")
+        ticker = str(_item_attr(item, "ticker", "") or "")
+        title = str(_item_attr(item, "title", "") or "")
+        evidence_type = str(_item_attr(item, "evidence_type", "") or "")
+        key = (url or screenshot_path or f"{ticker}:{title}:{evidence_type}").strip().casefold()
         if not key or key in seen:
             continue
         seen.add(key)
-        display_company = item.company or resolve_display_name(item.ticker, company_lookup)
-        display_title = replace_identifier_with_name(item.title or item.url, item.ticker, display_company)
+        display_company = str(_item_attr(item, "company", "") or resolve_display_name(ticker, company_lookup))
+        display_title = replace_identifier_with_name(title or url, ticker, display_company)
         records.append(
             {
                 "company": display_company,
-                "type": item.evidence_type,
+                "type": evidence_type,
                 "file_name": _reference_file_name(item, display_title),
-                "source": item.source,
+                "source": str(_item_attr(item, "source", "") or ""),
                 "link": _reference_link(item),
-                "period": item.period,
+                "period": str(_item_attr(item, "period", "") or ""),
                 "title": display_title,
             }
         )
     return sorted(records, key=_reference_sort_key)
 
 
-def _financial_reference_records(charts: list[FinancialChart], company_lookup: dict[str, str]) -> list[dict[str, str]]:
+def _financial_reference_records(charts: Any, company_lookup: dict[str, str]) -> list[dict[str, str]]:
     records: list[dict[str, str]] = []
-    for chart in charts:
-        for point in chart.points:
-            display_company = point.company or resolve_display_name(point.ticker, company_lookup)
-            for source in point.sources:
-                title = source.title or source.form or chart.title or point.metric_label
-                concept = f" · {source.concept}" if source.concept else ""
-                period = point.period or source.filed
-                file_name = f"{display_company} {point.metric_label} {period}{concept}".strip()
+    for chart in charts or []:
+        for point in _item_attr(chart, "points", []) or []:
+            ticker = str(_item_attr(point, "ticker", "") or "")
+            display_company = str(_item_attr(point, "company", "") or resolve_display_name(ticker, company_lookup))
+            for source in _item_attr(point, "sources", []) or []:
+                title = str(_item_attr(source, "title", "") or _item_attr(source, "form", "") or _item_attr(chart, "title", "") or _item_attr(point, "metric_label", "") or "")
+                concept_value = str(_item_attr(source, "concept", "") or "")
+                concept = f" · {concept_value}" if concept_value else ""
+                period = str(_item_attr(point, "period", "") or _item_attr(source, "filed", "") or "")
+                file_name = f"{display_company} {_item_attr(point, 'metric_label', '')} {period}{concept}".strip()
                 records.append(
                     {
                         "company": display_company,
                         "type": "financial_datapoint",
                         "file_name": file_name or title,
                         "source": title,
-                        "link": source.url,
+                        "link": str(_item_attr(source, "url", "") or ""),
                         "period": period,
-                        "title": chart.title,
+                        "title": str(_item_attr(chart, "title", "") or ""),
                     }
                 )
     return records
@@ -922,20 +960,25 @@ def _reference_sort_key(item: dict[str, str]) -> tuple[str, str, str, str]:
 
 
 def _reference_file_name(item: EvidenceItem, display_title: str) -> str:
-    if item.screenshot_path:
-        return Path(item.screenshot_path).name
-    if item.url:
-        path_name = Path(item.url.split("?", 1)[0].rstrip("/")).name
+    screenshot_path = str(_item_attr(item, "screenshot_path", "") or "")
+    url = str(_item_attr(item, "url", "") or "")
+    title = str(_item_attr(item, "title", "") or "")
+    if screenshot_path:
+        return Path(screenshot_path).name
+    if url:
+        path_name = Path(url.split("?", 1)[0].rstrip("/")).name
         if path_name and "." in path_name:
             return path_name
-    return display_title or item.title or item.url or "未命名资料"
+    return display_title or title or url or "未命名资料"
 
 
 def _reference_link(item: EvidenceItem) -> str:
-    if item.url:
-        return item.url
-    if item.screenshot_path:
-        return _local_path_to_uri(item.screenshot_path)
+    url = str(_item_attr(item, "url", "") or "")
+    screenshot_path = str(_item_attr(item, "screenshot_path", "") or "")
+    if url:
+        return url
+    if screenshot_path:
+        return _local_path_to_uri(screenshot_path)
     return ""
 
 
