@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import html
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -380,7 +381,12 @@ def _financial_charts_section(draft: ResearchDraft, compact: bool) -> str:
         </section>
         """
     chart_items = list(enumerate(draft.financial_charts))
-    charts = chart_items[:3] if compact else chart_items
+    if compact:
+        required_items = [(index, chart) for index, chart in chart_items if chart.required]
+        supplemental_items = [(index, chart) for index, chart in chart_items if not chart.required][:3]
+        charts = [*required_items, *supplemental_items]
+    else:
+        charts = chart_items
     return f"""
     <section class="section">
       <div class="section-title">
@@ -448,7 +454,17 @@ def _anomaly_card(anomaly: Any) -> str:
 
 
 def _chart_card(chart: FinancialChart, chart_index: int) -> str:
-    chart_html = _line_chart(chart, chart_index) if chart.chart_type == "line" else _bar_chart(chart, chart_index)
+    if chart.chart_type == "line":
+        chart_html = _line_chart(chart, chart_index)
+    elif chart.chart_type == "multi_line":
+        chart_html = _multi_line_chart(chart, chart_index)
+    elif chart.chart_type == "clustered_bar":
+        chart_html = _clustered_bar_chart(chart, chart_index)
+    elif chart.chart_type == "company_small_multiples_bar":
+        chart_html = _small_multiples_chart(chart, chart_index)
+    else:
+        chart_html = _bar_chart(chart, chart_index)
+    status = _chart_status_badge(chart)
     return f"""
     <article class="chart-card">
       <div class="chart-head">
@@ -458,11 +474,24 @@ def _chart_card(chart: FinancialChart, chart_index: int) -> str:
         </div>
         <span>{_e(chart.y_axis)}</span>
       </div>
+      {status}
       {chart_html}
       <p class="chart-insight">{_e(chart.insight)}</p>
+      {f'<p class="missing-reason">{_e(chart.missing_reason)}</p>' if chart.missing_reason else ''}
       <p class="source-note">{_e(chart.source_note)}</p>
     </article>
     """
+
+
+def _chart_status_badge(chart: FinancialChart) -> str:
+    if not chart.required:
+        return ""
+    labels = {
+        "available": "固定图表 · 数据完整",
+        "partial": "固定图表 · 部分数据",
+        "missing": "固定图表 · 待补数据",
+    }
+    return f"<div class='chart-status {chart.data_status}'>{_e(labels.get(chart.data_status, '固定图表'))}</div>"
 
 
 def _bar_chart(chart: FinancialChart, chart_index: int) -> str:
@@ -485,6 +514,128 @@ def _bar_chart(chart: FinancialChart, chart_index: int) -> str:
             """
         )
     return f"<div class='bar-chart'>{''.join(bars)}</div>"
+
+
+def _clustered_bar_chart(chart: FinancialChart, chart_index: int) -> str:
+    points = chart.points
+    if not points:
+        return _missing_chart_html(chart)
+    periods = sorted({point.period for point in points}, key=lambda value: _period_sort_key(value))
+    companies = _ordered_point_companies(points)
+    max_value = max((abs(point.value) for point in points), default=1) or 1
+    point_lookup = {(point.period, point_display_name(point)): (index, point) for index, point in enumerate(points)}
+    groups = []
+    for period in periods:
+        bars = []
+        for company_index, company in enumerate(companies):
+            match = point_lookup.get((period, company))
+            if not match:
+                bars.append(f"<span class='cluster-missing' title='{_e(company)} {_e(period)} 缺数据'></span>")
+                continue
+            point_index, point = match
+            height = max(6, min(100, abs(point.value) / max_value * 100))
+            bars.append(
+                f"""
+                <button class="cluster-bar c{company_index % 8}" type="button" style="height:{height}%" onclick="showFinancialPoint({chart_index},{point_index})">
+                  <span>{_e(point.display_value)}</span>
+                </button>
+                """
+            )
+        groups.append(
+            f"""
+            <div class="cluster-group">
+              <div class="cluster-bars">{''.join(bars)}</div>
+              <em>{_e(period)}</em>
+            </div>
+            """
+        )
+    legend = "".join(f"<span class='legend-item c{index % 8}'><i></i>{_e(company)}</span>" for index, company in enumerate(companies))
+    return f"<div class='chart-legend'>{legend}</div><div class='clustered-chart'>{''.join(groups)}</div>"
+
+
+def _multi_line_chart(chart: FinancialChart, chart_index: int) -> str:
+    points = chart.points
+    if not points:
+        return _missing_chart_html(chart)
+    periods = sorted({point.period for point in points}, key=lambda value: _period_sort_key(value))
+    companies = _ordered_point_companies(points)
+    values = [point.value for point in points]
+    min_value, max_value = min(values), max(values)
+    span = max(max_value - min_value, 1)
+    width, height = 760, 300
+    left, right, top, bottom = 50, 28, 26, 54
+    plot_width = width - left - right
+    plot_height = height - top - bottom
+    period_x = {period: left + (plot_width * index / max(1, len(periods) - 1)) for index, period in enumerate(periods)}
+    point_lookup = {(point.period, point_display_name(point)): (index, point) for index, point in enumerate(points)}
+    lines = []
+    dots = []
+    for company_index, company in enumerate(companies):
+        coords = []
+        for period in periods:
+            match = point_lookup.get((period, company))
+            if not match:
+                continue
+            point_index, point = match
+            x = period_x[period]
+            y = top + plot_height - ((point.value - min_value) / span * plot_height)
+            coords.append((x, y, point_index, point))
+        if len(coords) >= 2:
+            polyline = " ".join(f"{x:.1f},{y:.1f}" for x, y, _, _ in coords)
+            lines.append(f"<polyline points='{polyline}' class='trend multi c{company_index % 8}'></polyline>")
+        for x, y, point_index, point in coords:
+            dots.append(
+                f"""
+                <button class="multi-dot c{company_index % 8}" style="left:{x / width * 100:.2f}%;top:{y / height * 100:.2f}%" onclick="showFinancialPoint({chart_index},{point_index})">
+                  <span>{_e(company)} · {_e(point.display_value)}</span>
+                </button>
+                """
+            )
+    labels = "".join(f"<span style='left:{period_x[period] / width * 100:.2f}%'>{_e(period)}</span>" for period in periods)
+    legend = "".join(f"<span class='legend-item c{index % 8}'><i></i>{_e(company)}</span>" for index, company in enumerate(companies))
+    return f"""
+    <div class='chart-legend'>{legend}</div>
+    <div class="multi-line-chart">
+      <svg viewBox="0 0 {width} {height}" role="img" aria-label="{_e(chart.title)}">
+        <line x1="{left}" y1="{height-bottom}" x2="{width-right}" y2="{height-bottom}" class="axis"></line>
+        <line x1="{left}" y1="{top}" x2="{left}" y2="{height-bottom}" class="axis"></line>
+        {''.join(lines)}
+      </svg>
+      {''.join(dots)}
+      <div class="x-labels">{labels}</div>
+    </div>
+    """
+
+
+def _small_multiples_chart(chart: FinancialChart, chart_index: int) -> str:
+    if not chart.points:
+        return _missing_small_multiples_html(chart)
+    return _clustered_bar_chart(chart, chart_index)
+
+
+def _missing_small_multiples_html(chart: FinancialChart) -> str:
+    companies = chart.expected_companies or ["目标公司与可比公司"]
+    cards = []
+    for company in companies[:12]:
+        cards.append(
+            f"""
+            <div class="small-multiple-missing">
+              <strong>{_e(company)}</strong>
+              <span>待补分类表格</span>
+              <p>需要年报/季报分部表、业绩演示材料或 Wind 分业务字段。</p>
+            </div>
+            """
+        )
+    return f"<div class='small-multiples-missing'>{''.join(cards)}</div>"
+
+
+def _missing_chart_html(chart: FinancialChart) -> str:
+    return f"""
+    <div class="empty-chart missing-chart">
+      <strong>待补结构化数据</strong>
+      <p>{_e(chart.missing_reason or '当前没有可审计数据点。')}</p>
+    </div>
+    """
 
 
 def _line_chart(chart: FinancialChart, chart_index: int) -> str:
@@ -835,6 +986,29 @@ def _short_period(point: FinancialDataPoint) -> str:
     return period.replace("FY", "").replace(" ", "\n")
 
 
+def _ordered_point_companies(points: list[FinancialDataPoint]) -> list[str]:
+    companies: list[str] = []
+    for point in points:
+        name = point_display_name(point)
+        if name not in companies:
+            companies.append(name)
+    return companies
+
+
+def _period_sort_key(value: str) -> tuple[int, int, str]:
+    text = str(value or "")
+    match = re.search(r"(20\d{2}).*?Q([1-4])", text, flags=re.I)
+    if match:
+        return (int(match.group(1)), int(match.group(2)), text)
+    match = re.search(r"FY\s*(20\d{2})", text, flags=re.I)
+    if match:
+        return (int(match.group(1)), 4, text)
+    match = re.search(r"(20\d{2})", text)
+    if match:
+        return (int(match.group(1)), 0, text)
+    return (0, 0, text)
+
+
 def _e(value: object) -> str:
     return html.escape(str(value or ""), quote=True)
 
@@ -855,6 +1029,11 @@ def _style() -> str:
     .signal-card h3{font-size:20px;margin:14px 0 8px}.signal-card p{color:#42526b}.chart-hint{border-left:4px solid var(--cyan);padding:10px 12px;background:#f0fbff;border-radius:12px;margin:14px 0}.chart-hint strong{display:block}.chart-hint span{color:var(--muted);font-size:13px}
     .anomaly-ref{align-items:center;margin:8px 0}.anomaly-ref strong{font-size:12px;color:var(--muted)}.anomaly-ref span{max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
     .chart-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px}.chart-grid.compact{grid-template-columns:1fr}.chart-card{padding:18px;overflow:hidden}.chart-head{display:flex;justify-content:space-between;gap:16px;align-items:start}.chart-head h3{margin:0 0 6px;font-size:20px}.chart-head p,.source-note{color:var(--muted);font-size:13px;margin:0}.chart-head span{white-space:nowrap;background:#eef6ff;color:#2442a8;border-radius:999px;padding:6px 10px;font-size:12px;font-weight:800}.chart-insight{font-weight:800;color:#203047}.empty-state{padding:22px}.empty-chart{height:220px;display:grid;place-items:center;color:var(--muted)}
+    .chart-status{display:inline-flex;margin:10px 0 4px;border-radius:999px;padding:5px 10px;font-size:12px;font-weight:800;background:#ecfdf3;color:var(--green)}.chart-status.partial{background:#fff7ed;color:var(--orange)}.chart-status.missing{background:#fff1f0;color:var(--red)}.missing-reason{color:var(--orange);font-weight:800}.missing-chart{border:1px dashed #f59e0b;border-radius:16px;background:#fffbeb;padding:18px;text-align:center}.missing-chart strong{display:block;color:#92400e}.missing-chart p{max-width:720px;margin:8px auto;color:#92400e}
+    .small-multiples-missing{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin:14px 0}.small-multiple-missing{border:1px dashed #f59e0b;background:#fffbeb;border-radius:16px;padding:14px}.small-multiple-missing strong{display:block;color:#203047}.small-multiple-missing span{display:inline-flex;margin:7px 0;border-radius:999px;background:#fff7ed;color:#92400e;padding:4px 8px;font-size:12px;font-weight:800}.small-multiple-missing p{margin:0;color:#92400e;font-size:12px}
+    .chart-legend{display:flex;gap:10px;flex-wrap:wrap;margin:12px 0}.legend-item{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--muted);font-weight:800}.legend-item i{width:11px;height:11px;border-radius:999px;background:var(--blue)}.c1 i,.cluster-bar.c1,.trend.c1,.multi-dot.c1{--series:#0e9fbc}.c2 i,.cluster-bar.c2,.trend.c2,.multi-dot.c2{--series:#11845b}.c3 i,.cluster-bar.c3,.trend.c3,.multi-dot.c3{--series:#b45309}.c4 i,.cluster-bar.c4,.trend.c4,.multi-dot.c4{--series:#7c3aed}.c5 i,.cluster-bar.c5,.trend.c5,.multi-dot.c5{--series:#db2777}.c6 i,.cluster-bar.c6,.trend.c6,.multi-dot.c6{--series:#475569}.c7 i,.cluster-bar.c7,.trend.c7,.multi-dot.c7{--series:#dc2626}.legend-item.c0 i,.cluster-bar.c0,.trend.c0,.multi-dot.c0{--series:var(--blue)}.legend-item.c1 i{background:#0e9fbc}.legend-item.c2 i{background:#11845b}.legend-item.c3 i{background:#b45309}.legend-item.c4 i{background:#7c3aed}.legend-item.c5 i{background:#db2777}.legend-item.c6 i{background:#475569}.legend-item.c7 i{background:#dc2626}
+    .clustered-chart{height:310px;display:flex;gap:16px;align-items:end;padding:22px 4px 12px;border-bottom:1px solid var(--line);overflow-x:auto}.cluster-group{min-width:110px;flex:1;display:flex;flex-direction:column;gap:8px;align-items:center}.cluster-bars{height:230px;width:100%;display:flex;gap:4px;align-items:end;justify-content:center}.cluster-bar{position:relative;border:0;border-radius:8px 8px 3px 3px;background:var(--series,var(--blue));min-width:13px;flex:1;max-width:28px;cursor:pointer;box-shadow:0 8px 18px rgba(16,32,51,.14)}.cluster-bar span{display:none;position:absolute;bottom:calc(100% + 6px);left:50%;transform:translateX(-50%);white-space:nowrap;background:#102033;color:#fff;border-radius:9px;padding:4px 7px;font-size:11px}.cluster-bar:hover span{display:block}.cluster-group em{font-style:normal;font-size:11px;color:var(--muted);text-align:center}.cluster-missing{display:block;align-self:end;min-width:13px;flex:1;max-width:28px;height:8px;border-radius:6px;background:#e2e8f0}
+    .multi-line-chart{height:330px;position:relative;overflow-x:auto}.multi-line-chart svg{min-width:760px;width:100%;height:290px;display:block}.trend.multi{fill:none;stroke:var(--series,var(--blue));stroke-width:3.5;stroke-linecap:round;stroke-linejoin:round}.multi-dot{position:absolute;transform:translate(-50%,-50%);width:16px;height:16px;border-radius:999px;border:3px solid #fff;background:var(--series,var(--blue));box-shadow:0 4px 12px rgba(16,32,51,.28);cursor:pointer}.multi-dot span{position:absolute;left:50%;bottom:18px;transform:translateX(-50%);white-space:nowrap;background:#102033;color:#fff;border-radius:9px;padding:4px 7px;font-size:11px;opacity:0;pointer-events:none}.multi-dot:hover span{opacity:1}
     .anomaly-columns{display:grid;grid-template-columns:1fr 1fr;gap:18px}.anomaly-card{background:#fff;border:1px solid var(--line);border-radius:18px;padding:16px;margin:12px 0}.anomaly-card.selected{border-color:#2563eb;box-shadow:0 0 0 3px rgba(37,99,235,.10)}.anomaly-card span{font-size:12px;color:var(--muted);font-weight:800}.anomaly-card h4{margin:8px 0}.anomaly-card p{margin:8px 0}.anomaly-card strong{display:inline-block;background:#eef2ff;color:#1d4ed8;border-radius:999px;padding:5px 9px}
     .bar-chart{height:285px;display:flex;gap:10px;align-items:end;padding:20px 4px 8px;border-bottom:1px solid var(--line);overflow-x:auto}.bar-item{position:relative;min-width:72px;flex:1;height:230px;border:0;background:transparent;display:flex;flex-direction:column;align-items:center;justify-content:end;gap:6px;cursor:pointer;color:var(--ink)}.bar-item i{width:70%;border-radius:12px 12px 4px 4px;background:linear-gradient(180deg,var(--blue),var(--cyan));display:block;box-shadow:0 10px 22px rgba(39,94,254,.2);transition:.18s transform}.bar-item:hover i{transform:translateY(-4px)}.bar-value{font-size:12px;font-weight:800;color:#203047}.bar-item em{font-style:normal;font-size:11px;color:var(--muted);white-space:pre-line}.bar-item small{font-size:11px;color:var(--blue);font-weight:800}
     .line-chart{height:310px;position:relative;margin-top:8px}.line-chart svg{width:100%;height:260px;display:block}.axis{stroke:#d7e1ee;stroke-width:1}.trend{fill:none;stroke:var(--blue);stroke-width:4;stroke-linecap:round;stroke-linejoin:round}.line-dot{position:absolute;transform:translate(-50%,-50%);width:18px;height:18px;border-radius:999px;border:3px solid #fff;background:var(--blue);box-shadow:0 4px 12px rgba(39,94,254,.35);cursor:pointer}.line-dot span{position:absolute;left:50%;bottom:18px;transform:translateX(-50%);white-space:nowrap;background:#102033;color:#fff;border-radius:9px;padding:4px 7px;font-size:11px;opacity:0;pointer-events:none}.line-dot:hover span{opacity:1}.x-labels{position:absolute;left:0;right:0;bottom:8px;height:36px}.x-labels span{position:absolute;transform:translateX(-50%);font-size:11px;color:var(--muted);white-space:pre-line;text-align:center}

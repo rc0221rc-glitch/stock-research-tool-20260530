@@ -20,6 +20,8 @@ METRIC_CONCEPTS: dict[str, list[str]] = {
     "rd_expense": ["ResearchAndDevelopmentExpense", "ResearchAndDevelopmentExpenseExcludingAcquiredInProcessCost"],
     "operating_income": ["OperatingIncomeLoss"],
     "net_income": ["NetIncomeLoss"],
+    "ebitda": ["EarningsBeforeInterestTaxesDepreciationAmortization"],
+    "depreciation_amortization": ["DepreciationDepletionAndAmortization", "DepreciationDepletionAndAmortizationExpense", "DepreciationAndAmortization"],
     "cash_from_operations": ["NetCashProvidedByUsedInOperatingActivities", "NetCashProvidedByUsedInOperatingActivitiesContinuingOperations"],
     "capex": ["PaymentsToAcquirePropertyPlantAndEquipment", "PaymentsToAcquireProductiveAssets"],
 }
@@ -30,7 +32,10 @@ METRIC_LABELS = {
     "rd_expense": "R&D Expense",
     "operating_income": "Operating Income",
     "net_income": "Net Income",
+    "ebitda": "EBITDA",
+    "depreciation_amortization": "D&A",
     "gross_margin": "Gross Margin",
+    "net_margin": "Net Margin",
     "operating_margin": "Operating Margin",
     "rd_intensity": "R&D / Revenue",
     "cash_from_operations": "Operating Cash Flow",
@@ -39,7 +44,27 @@ METRIC_LABELS = {
     "capex_intensity": "CapEx / Revenue",
     "inventory": "Inventory",
     "construction_in_progress": "Construction in Progress",
+    "segment_quarter_revenue": "Segment Revenue",
+    "segment_annual_revenue": "Annual Segment Revenue",
+    "segment_quarter_gross_margin": "Segment Gross Margin",
+    "segment_annual_gross_margin": "Annual Segment Gross Margin",
 }
+
+REQUIRED_FINANCIAL_CHART_IDS = (
+    "fixed_peer_quarterly_revenue",
+    "fixed_peer_quarterly_net_income",
+    "fixed_peer_quarterly_ebitda",
+    "fixed_peer_quarterly_operating_cash_flow",
+    "fixed_peer_quarterly_capex",
+    "fixed_peer_quarterly_rd_expense",
+    "fixed_company_quarterly_segment_revenue",
+    "fixed_company_annual_segment_revenue",
+    "fixed_company_quarterly_segment_gross_margin",
+    "fixed_company_annual_segment_gross_margin",
+    "fixed_peer_quarterly_gross_margin",
+    "fixed_peer_quarterly_net_margin",
+    "fixed_peer_quarterly_rd_intensity",
+)
 
 
 @dataclass
@@ -100,12 +125,12 @@ def build_financial_charts(
     if is_wind_available() and any(_series_uses_wind(series) for series in all_series.values()):
         notes.append(WIND_SOURCE_NOTE)
 
-    charts: list[FinancialChart] = []
+    target = target or companies[0]
+    target_name = company_display_name(target)
+    charts: list[FinancialChart] = _required_financial_charts(all_series, public_companies, target, quarter_count)
     if not all_series:
         return charts, notes
 
-    target = target or companies[0]
-    target_name = company_display_name(target)
     target_series = all_series.get(_company_series_key(target), {})
     if not target_series:
         notes.append(
@@ -221,6 +246,150 @@ def build_financial_charts(
     return charts, notes
 
 
+def _required_financial_charts(
+    all_series: dict[str, dict[str, MetricSeries]],
+    companies: list[CompanyProfile],
+    target: CompanyProfile,
+    quarter_count: int,
+) -> list[FinancialChart]:
+    charts: list[FinancialChart] = []
+    clustered_specs = [
+        ("fixed_peer_quarterly_revenue", "每季度销售收入：目标公司与可比公司", "revenue", "clustered_bar", "销售收入"),
+        ("fixed_peer_quarterly_net_income", "每季度净利润：目标公司与可比公司", "net_income", "clustered_bar", "净利润"),
+        ("fixed_peer_quarterly_ebitda", "每季度 EBITDA：目标公司与可比公司", "ebitda", "clustered_bar", "EBITDA"),
+        ("fixed_peer_quarterly_operating_cash_flow", "每季度经营活动现金流净额：目标公司与可比公司", "cash_from_operations", "clustered_bar", "经营活动现金流净额"),
+        ("fixed_peer_quarterly_capex", "每季度 CAPEX：目标公司与可比公司", "capex", "clustered_bar", "CAPEX"),
+        ("fixed_peer_quarterly_rd_expense", "每季度研发费用：目标公司与可比公司", "rd_expense", "clustered_bar", "研发费用"),
+    ]
+    for chart_id, title, metric, chart_type, label in clustered_specs:
+        points = _metric_points_across_companies(all_series, companies, metric, quarter_count)
+        charts.append(_required_metric_chart(chart_id, title, metric, chart_type, points, companies, quarter_count, f"固定横向对比图：{label}。"))
+
+    segment_specs = [
+        ("fixed_company_quarterly_segment_revenue", "每季度分类销售收入：每家公司自身一张图", "segment_quarter_revenue", "分类销售收入"),
+        ("fixed_company_annual_segment_revenue", "每年度分类销售收入：每家公司自身一张图", "segment_annual_revenue", "年度分类销售收入"),
+        ("fixed_company_quarterly_segment_gross_margin", "每季度分类毛利率：每家公司自身一张图", "segment_quarter_gross_margin", "分类毛利率"),
+        ("fixed_company_annual_segment_gross_margin", "每年度分类毛利率：每家公司自身一张图", "segment_annual_gross_margin", "年度分类毛利率"),
+    ]
+    for chart_id, title, metric, label in segment_specs:
+        charts.append(_required_segment_chart(chart_id, title, metric, companies, target, label))
+
+    line_specs = [
+        ("fixed_peer_quarterly_gross_margin", "单季度毛利率：目标公司与可比公司", "gross_margin", "单季度毛利率"),
+        ("fixed_peer_quarterly_net_margin", "单季度净利润率：目标公司与可比公司", "net_margin", "单季度净利润率"),
+        ("fixed_peer_quarterly_rd_intensity", "单季度研发费用占销售收入百分比：目标公司与可比公司", "rd_intensity", "研发费用占收入"),
+    ]
+    for chart_id, title, metric, label in line_specs:
+        points = _metric_points_across_companies(all_series, companies, metric, quarter_count)
+        charts.append(_required_metric_chart(chart_id, title, metric, "multi_line", points, companies, quarter_count, f"固定折线图：{label}。"))
+    return charts
+
+
+def _required_metric_chart(
+    chart_id: str,
+    title: str,
+    metric: str,
+    chart_type: str,
+    points: list[FinancialDataPoint],
+    companies: list[CompanyProfile],
+    quarter_count: int,
+    subtitle_prefix: str,
+) -> FinancialChart:
+    status = _chart_data_status(points, companies, quarter_count)
+    missing_reason = "" if points else f"尚未从 SEC XBRL、Wind 或巨潮官方 PDF 中取得可审计的 {METRIC_LABELS.get(metric, metric)} 数据点。"
+    return FinancialChart(
+        chart_id=chart_id,
+        title=title,
+        subtitle=f"{subtitle_prefix} 有可审计数据则直接作图；缺失公司或季度会在卡片中透明标记。",
+        chart_type=chart_type,
+        y_axis=_axis_label(points) if points else ("%" if metric in {"gross_margin", "net_margin", "rd_intensity"} else "reported currency"),
+        points=points,
+        insight=_required_chart_insight(metric, points, companies),
+        source_note=_source_note_for_points(points) if points else "暂无可审计数据源；不会用同行或估算数据兜底。",
+        required=True,
+        data_status=status,
+        missing_reason=missing_reason or _partial_missing_reason(points, companies, quarter_count),
+    )
+
+
+def _required_segment_chart(
+    chart_id: str,
+    title: str,
+    metric: str,
+    companies: list[CompanyProfile],
+    target: CompanyProfile,
+    label: str,
+) -> FinancialChart:
+    company_names = "、".join(company_display_name(company) for company in companies[:6])
+    return FinancialChart(
+        chart_id=chart_id,
+        title=title,
+        subtitle=f"固定分类经营图：{label}。正式数据必须来自年报/季报分部表、IR presentation 表格或 Wind 分业务经营数据。",
+        chart_type="company_small_multiples_bar",
+        y_axis="%" if "gross_margin" in metric else "reported currency",
+        points=[],
+        insight=f"当前已预留 {company_names or company_display_name(target)} 的分类图位置；没有可追溯分类表格时只显示缺口，不生成估算图。",
+        source_note="分类收入/分类毛利率需要逐表抽取产品、地区或业务分部数据；当前没有足够可审计结构化数据。",
+        required=True,
+        data_status="missing",
+        missing_reason="尚未接入可稳定抽取的分类收入/分类毛利率结构化字段；下一步应从年报分部信息、业绩演示材料和 Wind 分业务数据补抓。",
+        expected_companies=[company_display_name(company) for company in (companies or [target])],
+    )
+
+
+def _metric_points_across_companies(
+    all_series: dict[str, dict[str, MetricSeries]],
+    companies: list[CompanyProfile],
+    metric: str,
+    quarter_count: int,
+) -> list[FinancialDataPoint]:
+    ordered_keys = [_company_series_key(company) for company in companies]
+    company_order = {key: index for index, key in enumerate(ordered_keys)}
+    points: list[FinancialDataPoint] = []
+    for company in companies:
+        series = all_series.get(_company_series_key(company), {}).get(metric)
+        if not series or not series.points:
+            continue
+        points.extend(sorted(series.points, key=lambda point: point.end_date)[-quarter_count:])
+    return sorted(points, key=lambda point: (point.end_date or point.period, company_order.get((point.ticker or point.company).upper(), 999), point.period))
+
+
+def _chart_data_status(points: list[FinancialDataPoint], companies: list[CompanyProfile], quarter_count: int) -> str:
+    if not points:
+        return "missing"
+    covered = {(point.ticker or point.company).upper() for point in points}
+    expected = {(company.ticker or company.name).upper() for company in companies}
+    periods = {point.period for point in points}
+    if expected and covered >= expected and len(periods) >= quarter_count:
+        return "available"
+    return "partial"
+
+
+def _partial_missing_reason(points: list[FinancialDataPoint], companies: list[CompanyProfile], quarter_count: int) -> str:
+    if not points:
+        return ""
+    covered = {(point.ticker or point.company).upper() for point in points}
+    missing_companies = [company_display_name(company) for company in companies if (company.ticker or company.name).upper() not in covered]
+    periods = sorted({point.period for point in points})
+    pieces: list[str] = []
+    if missing_companies:
+        pieces.append(f"缺少公司：{'、'.join(missing_companies[:6])}")
+    if len(periods) < quarter_count:
+        pieces.append(f"当前只有 {len(periods)} 个季度/期间，少于用户选择的 {quarter_count} 个")
+    return "；".join(pieces)
+
+
+def _required_chart_insight(metric: str, points: list[FinancialDataPoint], companies: list[CompanyProfile]) -> str:
+    if not points:
+        return f"{METRIC_LABELS.get(metric, metric)} 暂无可审计数据点；该固定图表不会用估算值或同行数据替代。"
+    latest_period = max(points, key=lambda point: point.end_date or point.period).period
+    latest_points = [point for point in points if point.period == latest_period]
+    if len(latest_points) >= 2:
+        ranked = sorted(latest_points, key=lambda point: point.value, reverse=True)
+        return f"{latest_period} 最新可比窗口中，{point_display_name(ranked[0])} 最高（{ranked[0].display_value}），{point_display_name(ranked[-1])} 最低（{ranked[-1].display_value}）。"
+    return f"已取得 {len(points)} 个 {METRIC_LABELS.get(metric, metric)} 数据点，覆盖 {len({point.ticker for point in points})} / {len(companies)} 家公司。"
+
+
 def _company_series_key(company: CompanyProfile) -> str:
     return (company.ticker or company.name).upper()
 
@@ -290,6 +459,13 @@ def fetch_cninfo_metric_series(company: CompanyProfile, quarter_count: int = 4) 
     derived = _derived_margin_points(company, raw_metric_points, "operating_margin", "operating_income", "revenue")
     if derived:
         series["operating_margin"] = MetricSeries("operating_margin", METRIC_LABELS["operating_margin"], sorted(derived, key=lambda point: point.end_date)[-quarter_count:])
+    derived = _derived_margin_points(company, raw_metric_points, "net_margin", "net_income", "revenue")
+    if derived:
+        series["net_margin"] = MetricSeries("net_margin", METRIC_LABELS["net_margin"], sorted(derived, key=lambda point: point.end_date)[-quarter_count:])
+    if "ebitda" not in series:
+        ebitda = _derived_ebitda_points(company, raw_metric_points)
+        if ebitda:
+            series["ebitda"] = MetricSeries("ebitda", METRIC_LABELS["ebitda"], sorted(ebitda, key=lambda point: point.end_date)[-quarter_count:])
     derived = _derived_margin_points(company, raw_metric_points, "rd_intensity", "rd_expense", "revenue")
     if derived:
         series["rd_intensity"] = MetricSeries("rd_intensity", METRIC_LABELS["rd_intensity"], sorted(derived, key=lambda point: point.end_date)[-quarter_count:])
@@ -488,6 +664,10 @@ def _metric_from_cninfo_label(label: str) -> str:
         return "net_income"
     if "经营活动产生的现金流量净额" in compact:
         return "cash_from_operations"
+    if "购建固定资产" in compact and ("支付" in compact or "现金" in compact):
+        return "capex"
+    if "资本开支" in compact and "率" not in compact and "占比" not in compact:
+        return "capex"
     if "营业利润" in compact and "利润率" not in compact:
         return "operating_income"
     if "研发费用" in compact and "占" not in compact and "率" not in compact:
@@ -577,6 +757,13 @@ def fetch_company_metric_series(company: CompanyProfile, quarter_count: int = 4)
     derived = _derived_margin_points(company, raw_metric_points, "operating_margin", "operating_income", "revenue")
     if derived:
         series["operating_margin"] = MetricSeries("operating_margin", METRIC_LABELS["operating_margin"], derived)
+    derived = _derived_margin_points(company, raw_metric_points, "net_margin", "net_income", "revenue")
+    if derived:
+        series["net_margin"] = MetricSeries("net_margin", METRIC_LABELS["net_margin"], derived)
+    if "ebitda" not in series:
+        ebitda = _derived_ebitda_points(company, raw_metric_points)
+        if ebitda:
+            series["ebitda"] = MetricSeries("ebitda", METRIC_LABELS["ebitda"], ebitda)
     derived = _derived_margin_points(company, raw_metric_points, "rd_intensity", "rd_expense", "revenue")
     if derived:
         series["rd_intensity"] = MetricSeries("rd_intensity", METRIC_LABELS["rd_intensity"], derived)
@@ -632,6 +819,13 @@ def fetch_wind_metric_series(company: CompanyProfile, quarter_count: int = 4) ->
         derived = _derived_margin_points(company, raw_metric_points, "operating_margin", "operating_income", "revenue")
         if derived and "operating_margin" not in series:
             series["operating_margin"] = MetricSeries("operating_margin", METRIC_LABELS["operating_margin"], derived)
+        derived = _derived_margin_points(company, raw_metric_points, "net_margin", "net_income", "revenue")
+        if derived and "net_margin" not in series:
+            series["net_margin"] = MetricSeries("net_margin", METRIC_LABELS["net_margin"], derived)
+        if "ebitda" not in series:
+            ebitda = _derived_ebitda_points(company, raw_metric_points)
+            if ebitda:
+                series["ebitda"] = MetricSeries("ebitda", METRIC_LABELS["ebitda"], ebitda)
         derived = _derived_margin_points(company, raw_metric_points, "rd_intensity", "rd_expense", "revenue")
         if derived and "rd_intensity" not in series:
             series["rd_intensity"] = MetricSeries("rd_intensity", METRIC_LABELS["rd_intensity"], derived)
@@ -683,7 +877,7 @@ def _fetch_wind_bulk_rows(windcode: str, periods: list[str], errors: list[str] |
 
 def _fetch_wind_period_row(windcode: str, period: str, errors: list[str] | None = None) -> tuple[dict[str, Any], dict[str, str]]:
     suffixes = [
-        f"{period}营业收入销售毛利率营业利润率营业利润营业成本净利润研发费用",
+        f"{period}营业收入销售毛利率营业利润率营业利润营业成本净利润研发费用经营活动产生的现金流量净额购建固定资产支付的现金资本开支EBITDA息税折旧摊销前利润折旧摊销",
         f"{period}revenuegrossmarginoperatingmargin",
     ]
     merged_row: dict[str, Any] = {}
@@ -724,6 +918,10 @@ def _extract_wind_metrics(row: dict[str, Any], units: dict[str, str], period: st
 
     operating_income = _pick_numeric_column(row, units, include=["营业利润"], exclude=["营业利润率"])
     net_income = _pick_numeric_column(row, units, include=["净利润"], exclude=["净利率", "ROE", "ROA"])
+    ebitda = _pick_numeric_column(row, units, include=["EBITDA"], exclude=[])
+    if ebitda is None:
+        ebitda = _pick_numeric_column(row, units, include=["息税折旧摊销前利润"], exclude=[])
+    depreciation_amortization = _pick_numeric_column(row, units, include=["折旧摊销"], exclude=["EBITDA", "息税折旧摊销前利润"])
     rd_expense = _pick_numeric_column(row, units, include=["研发费用"], exclude=["占比", "率"])
     cash_from_operations = _pick_numeric_column(row, units, include=["经营活动产生的现金流量净额"], exclude=[])
     if cash_from_operations is None:
@@ -746,6 +944,8 @@ def _extract_wind_metrics(row: dict[str, Any], units: dict[str, str], period: st
         "gross_profit": gross_profit,
         "operating_income": operating_income,
         "net_income": net_income,
+        "ebitda": ebitda,
+        "depreciation_amortization": depreciation_amortization,
         "rd_expense": rd_expense,
         "cash_from_operations": cash_from_operations,
         "capex": capex,
@@ -1172,6 +1372,34 @@ def _derived_free_cash_flow_points(
                 value=value,
                 display_value=_format_value(value, operating_cash[end_date].unit or capex[end_date].unit),
                 unit=operating_cash[end_date].unit or capex[end_date].unit,
+                series=company.ticker,
+                sources=sources,
+            )
+        )
+    return points
+
+
+def _derived_ebitda_points(
+    company: CompanyProfile,
+    raw_metric_points: dict[str, list[FinancialDataPoint]],
+) -> list[FinancialDataPoint]:
+    operating_income = {point.end_date: point for point in raw_metric_points.get("operating_income", [])}
+    da_points = {point.end_date: point for point in raw_metric_points.get("depreciation_amortization", [])}
+    points: list[FinancialDataPoint] = []
+    for end_date in sorted(set(operating_income) & set(da_points)):
+        value = operating_income[end_date].value + da_points[end_date].value
+        sources = [*operating_income[end_date].sources, *da_points[end_date].sources]
+        points.append(
+            FinancialDataPoint(
+                ticker=company.ticker,
+                company=company.name,
+                metric="ebitda",
+                metric_label=METRIC_LABELS["ebitda"],
+                period=operating_income[end_date].period,
+                end_date=end_date,
+                value=value,
+                display_value=_format_value(value, operating_income[end_date].unit or da_points[end_date].unit),
+                unit=operating_income[end_date].unit or da_points[end_date].unit,
                 series=company.ticker,
                 sources=sources,
             )

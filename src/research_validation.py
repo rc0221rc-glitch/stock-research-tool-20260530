@@ -4,12 +4,13 @@ from collections import Counter
 
 from .research_anomalies import POSITIVE, RISK
 from .research_display import company_display_name
+from .research_financials import REQUIRED_FINANCIAL_CHART_IDS
 from .research_models import ResearchDraft, ValidationCheck, ValidationReport
 
 
 FINAL_MIN_SECONDS = 30 * 60
 MIN_SIGNALS = 5
-MIN_FINANCIAL_CHARTS = 6
+MIN_FINANCIAL_CHARTS = len(REQUIRED_FINANCIAL_CHART_IDS)
 MIN_EVIDENCE = 60
 MIN_COMPANIES = 5
 MIN_MODEL_RUNS = 1
@@ -158,14 +159,20 @@ def _check_multi_model_attempts(draft: ResearchDraft) -> ValidationCheck:
 
 
 def _check_financial_charts(draft: ResearchDraft) -> ValidationCheck:
+    required_ids = set(REQUIRED_FINANCIAL_CHART_IDS)
+    present_ids = {chart.chart_id for chart in draft.financial_charts}
+    missing_ids = sorted(required_ids - present_ids)
+    available_required = [chart for chart in draft.financial_charts if chart.chart_id in required_ids and chart.data_status == "available"]
+    partial_required = [chart for chart in draft.financial_charts if chart.chart_id in required_ids and chart.data_status == "partial"]
+    missing_required = [chart for chart in draft.financial_charts if chart.chart_id in required_ids and chart.data_status == "missing"]
     return _check(
         "financial_charts",
         "财务图表",
-        "交付物必须包含真实财务数据图表，而不是只有文字和链接。",
-        len(draft.financial_charts) >= MIN_FINANCIAL_CHARTS,
-        f"当前财务图表 {len(draft.financial_charts)} 个。",
-        f"至少 {MIN_FINANCIAL_CHARTS} 个核心财务/经营/比率/横向可比图表。",
-        "继续补经营数据、分部数据、同比/环比、估值/CapEx/库存/backlog 等图表。",
+        "每份交付物必须固定包含 13 张目标公司与可比公司财务/经营图表；无可审计数据时只能显示缺口，不能伪造。",
+        not missing_ids and len(draft.financial_charts) >= MIN_FINANCIAL_CHARTS,
+        f"固定图表 present={len(required_ids) - len(missing_ids)}/{len(required_ids)}；available={len(available_required)}；partial={len(partial_required)}；missing_data={len(missing_required)}；缺少规格={', '.join(missing_ids) or '无'}。",
+        "13 个固定 chart_id 均应存在，并明确标记 available/partial/missing。",
+        "继续补分部收入/分部毛利率、EBITDA、CapEx、现金流等结构化数据源，提高固定图表 available 比例。",
     )
 
 

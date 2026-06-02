@@ -202,6 +202,10 @@ class FinancialChart:
     points: list[FinancialDataPoint] = field(default_factory=list)
     insight: str = ""
     source_note: str = "SEC XBRL companyfacts; each point links to the filing accession index."
+    required: bool = False
+    data_status: str = "available"
+    missing_reason: str = ""
+    expected_companies: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)

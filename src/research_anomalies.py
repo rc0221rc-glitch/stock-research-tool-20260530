@@ -91,6 +91,8 @@ def anomaly_markdown(anomalies: list[ObjectiveAnomaly]) -> str:
 def _financial_trend_anomalies(charts: list[FinancialChart]) -> list[ObjectiveAnomaly]:
     anomalies: list[ObjectiveAnomaly] = []
     for chart in charts:
+        if getattr(chart, "data_status", "available") == "missing":
+            continue
         if not chart.chart_id.startswith("target_") or len(chart.points) < 2:
             continue
         points = sorted(chart.points, key=lambda point: point.end_date)
@@ -127,9 +129,14 @@ def _financial_trend_anomalies(charts: list[FinancialChart]) -> list[ObjectiveAn
 def _peer_rank_anomalies(charts: list[FinancialChart]) -> list[ObjectiveAnomaly]:
     anomalies: list[ObjectiveAnomaly] = []
     for chart in charts:
-        if not chart.chart_id.startswith("peer_") or len(chart.points) < 3:
+        if getattr(chart, "data_status", "available") == "missing":
             continue
-        points = sorted(chart.points, key=lambda point: point.value, reverse=True)
+        if not (chart.chart_id.startswith("peer_") or chart.chart_id.startswith("fixed_peer_")) or len(chart.points) < 3:
+            continue
+        chart_points = _latest_period_points(chart.points) if chart.chart_id.startswith("fixed_peer_") else chart.points
+        if len(chart_points) < 3:
+            continue
+        points = sorted(chart_points, key=lambda point: point.value, reverse=True)
         values = [point.value for point in points]
         median_value = median(values)
         top = points[0]
@@ -221,6 +228,13 @@ def _evidence_gap_anomalies(evidence: list[EvidenceItem]) -> list[ObjectiveAnoma
             )
         )
     return anomalies
+
+
+def _latest_period_points(points: list[FinancialDataPoint]) -> list[FinancialDataPoint]:
+    latest_end_date = max((point.end_date or point.period for point in points), default="")
+    if not latest_end_date:
+        return points
+    return [point for point in points if (point.end_date or point.period) == latest_end_date]
 
 
 def _trend_threshold(metric: str) -> float:
