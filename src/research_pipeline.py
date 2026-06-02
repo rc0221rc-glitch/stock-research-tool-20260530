@@ -4,9 +4,11 @@ from collections import Counter, defaultdict
 from datetime import datetime
 from typing import Any
 
+from .research_anomalies import build_objective_anomalies
+from .research_evidence_backfill import backfill_evidence_coverage
 from .research_financials import build_financial_charts
 from .research_llm import generate_deepseek_research_signals, missing_deepseek_key_record, resolve_deepseek_api_key
-from .research_models import AuditFinding, CompanyProfile, EvidenceItem, FinancialChart, ResearchDraft, ResearchSignal, SignalScore
+from .research_models import AuditFinding, CompanyProfile, EvidenceItem, FinancialChart, ObjectiveAnomaly, ResearchDraft, ResearchSignal, SignalScore
 from .research_screenshots import capture_evidence_screenshots
 from .research_universe import get_company_profile, recommend_comparable_groups
 from .research_validation import validate_research_draft
@@ -37,6 +39,7 @@ def collect_research_draft(
     task_mode: str = "streamlit_sync_prototype",
     user_id: str = "",
     job_id: str = "",
+    selected_anomalies: list[ObjectiveAnomaly] | None = None,
 ) -> ResearchDraft:
     target = get_company_profile(target_query)
     groups = comparable_groups or recommend_comparable_groups(target.ticker or target.name)
@@ -55,18 +58,37 @@ def collect_research_draft(
             evidence.extend(items)
             run_notes.extend(notes)
 
-    evidence = _dedupe_evidence(evidence)
-    if capture_screenshots:
-        run_notes.extend(capture_evidence_screenshots(evidence, limit=3))
     financial_charts, financial_notes = build_financial_charts(companies, quarter_count=quarter_count)
     run_notes.extend(financial_notes)
+    evidence = _dedupe_evidence(evidence)
+    evidence, backfill_notes = backfill_evidence_coverage(
+        evidence,
+        target=target,
+        groups=groups,
+        financial_charts=financial_charts,
+        years=years,
+        quarters=quarters,
+        include_external_search=include_external_search,
+    )
+    run_notes.extend(backfill_notes)
+    if capture_screenshots:
+        run_notes.extend(capture_evidence_screenshots(evidence, limit=3))
+    objective_anomalies = build_objective_anomalies(evidence, financial_charts)
+    if selected_anomalies:
+        selected_ids = {anomaly.anomaly_id for anomaly in selected_anomalies}
+        objective_anomalies = [
+            ObjectiveAnomaly(**{**anomaly.to_dict(), "selected_for_deep_dive": anomaly.anomaly_id in selected_ids})
+            for anomaly in objective_anomalies
+        ]
     audit_findings = audit_evidence(evidence, target, groups, financial_charts)
     fallback_signals = build_signal_draft(evidence, target, groups, financial_charts)
+    _annotate_and_downgrade_weak_strong_signals(fallback_signals, evidence)
     signals = fallback_signals
     next_fetch_plan = build_next_fetch_plan(evidence, signals, groups, financial_charts)
     model_runs = []
     deepseek_api_key = resolve_deepseek_api_key(deepseek_api_key) if enable_llm else ""
-    if enable_llm and deepseek_api_key:
+    should_run_deep_analysis = enable_llm and bool(selected_anomalies)
+    if should_run_deep_analysis and deepseek_api_key:
         llm_signals, llm_plan, model_run = generate_deepseek_research_signals(
             api_key=deepseek_api_key,
             target_name=target.name,
@@ -74,14 +96,15 @@ def collect_research_draft(
             comparable_groups=groups,
             evidence=evidence,
             financial_charts=financial_charts,
+            selected_anomalies=selected_anomalies or [anomaly for anomaly in objective_anomalies if anomaly.selected_for_deep_dive],
             fallback_signals=fallback_signals,
         )
         model_runs.append(model_run)
         if model_run.status == "success":
-            signals = llm_signals
+            signals = _ensure_deep_signal_floor(llm_signals, selected_anomalies or [anomaly for anomaly in objective_anomalies if anomaly.selected_for_deep_dive], fallback_signals, evidence)
             if llm_plan:
                 next_fetch_plan = llm_plan
-    elif enable_llm and require_llm:
+    elif should_run_deep_analysis and require_llm:
         model_runs.append(missing_deepseek_key_record())
     draft = ResearchDraft(
         target=target,
@@ -93,13 +116,22 @@ def collect_research_draft(
         next_fetch_plan=next_fetch_plan,
         generated_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         financial_charts=financial_charts,
+        objective_anomalies=objective_anomalies,
         model_runs=model_runs,
         run_notes=run_notes,
         run_metadata={
             "task_mode": task_mode,
             "job_id": job_id,
             "user_id": user_id,
-            "queue_statuses": ["submitted", "collecting_evidence", "model_analysis", "validation_ready"],
+            "queue_statuses": [
+                "submitted",
+                "collecting_evidence",
+                "objective_anomaly_scan",
+                "user_anomaly_selection" if not selected_anomalies else "model_deep_analysis",
+                "validation_ready",
+            ],
+            "workflow_stage": "deep_analysis_ready" if selected_anomalies else "objective_scan_ready",
+            "selected_anomaly_ids": [anomaly.anomaly_id for anomaly in selected_anomalies or []],
             "permissions": {
                 "visibility": "authorized",
                 "access_logs": "local_or_supabase",
@@ -109,10 +141,88 @@ def collect_research_draft(
         },
     )
     draft.validation_report = validate_research_draft(draft)
-    if any(run.status == "success" for run in model_runs):
-        draft.report_label = "DeepSeek 已参与分析的内测研究草稿：仍需完成截图溯源、权限、队列等最终交付验收"
+    if selected_anomalies and any(run.status == "success" for run in model_runs):
+        draft.report_label = "DeepSeek 已基于用户勾选的客观异常完成深度分析：仍需完成截图溯源、权限、队列等最终交付验收"
+    elif selected_anomalies:
+        draft.report_label = "深度分析草稿：用户已选择异常条目，但大模型未成功参与分析，未达到专业最终交付标准"
     else:
-        draft.report_label = "可内测研究草稿：未成功调用大模型，未达到专业最终交付标准"
+        draft.report_label = "第一阶段客观扫描结果：已完成资料/数据收集、横纵对比和异常列表，等待用户勾选后再做深度分析"
+    return draft
+
+
+def run_deep_analysis_for_selected_anomalies(
+    draft: ResearchDraft,
+    selected_anomaly_ids: list[str],
+    deepseek_api_key: str = "",
+    require_llm: bool = True,
+) -> ResearchDraft:
+    selected_ids = set(selected_anomaly_ids)
+    draft.objective_anomalies = [
+        ObjectiveAnomaly(**{**anomaly.to_dict(), "selected_for_deep_dive": anomaly.anomaly_id in selected_ids})
+        for anomaly in draft.objective_anomalies
+    ]
+    selected = [anomaly for anomaly in draft.objective_anomalies if anomaly.selected_for_deep_dive]
+    years = recent_years_for_quarters(draft.quarter_count)
+    draft.evidence, backfill_notes = backfill_evidence_coverage(
+        draft.evidence,
+        target=draft.target,
+        groups=draft.comparable_groups,
+        financial_charts=draft.financial_charts,
+        years=years,
+        quarters=QUARTER_OPTIONS,
+        include_external_search=True,
+    )
+    draft.run_notes.extend(backfill_notes)
+    if not any(item.screenshot_path for item in draft.evidence):
+        draft.run_notes.extend(capture_evidence_screenshots(draft.evidence, limit=3))
+    draft.objective_anomalies = build_objective_anomalies(draft.evidence, draft.financial_charts)
+    draft.objective_anomalies = [
+        ObjectiveAnomaly(**{**anomaly.to_dict(), "selected_for_deep_dive": anomaly.anomaly_id in selected_ids})
+        for anomaly in draft.objective_anomalies
+    ]
+    selected = [anomaly for anomaly in draft.objective_anomalies if anomaly.selected_for_deep_dive]
+    draft.run_metadata["workflow_stage"] = "model_deep_analysis"
+    draft.run_metadata["selected_anomaly_ids"] = [anomaly.anomaly_id for anomaly in selected]
+    draft.run_metadata["queue_statuses"] = [
+        "submitted",
+        "collecting_evidence",
+        "objective_anomaly_scan",
+        "user_anomaly_selection",
+        "model_deep_analysis",
+        "validation_ready",
+    ]
+
+    fallback_signals = build_signal_draft(draft.evidence, draft.target, draft.comparable_groups, draft.financial_charts)
+    _annotate_and_downgrade_weak_strong_signals(fallback_signals, draft.evidence)
+    draft.signals = fallback_signals
+    draft.next_fetch_plan = build_next_fetch_plan(draft.evidence, fallback_signals, draft.comparable_groups, draft.financial_charts)
+    api_key = resolve_deepseek_api_key(deepseek_api_key)
+    if selected and api_key:
+        llm_signals, llm_plan, model_run = generate_deepseek_research_signals(
+            api_key=api_key,
+            target_name=draft.target.name,
+            quarter_count=draft.quarter_count,
+            comparable_groups=draft.comparable_groups,
+            evidence=draft.evidence,
+            financial_charts=draft.financial_charts,
+            selected_anomalies=selected,
+            fallback_signals=fallback_signals,
+        )
+        draft.model_runs.append(model_run)
+        if model_run.status == "success":
+            draft.signals = _ensure_deep_signal_floor(llm_signals, selected, fallback_signals, draft.evidence)
+            if llm_plan:
+                draft.next_fetch_plan = llm_plan
+    elif selected and require_llm:
+        draft.model_runs.append(missing_deepseek_key_record())
+
+    if selected and any(run.status == "success" for run in draft.model_runs):
+        draft.report_label = "DeepSeek 已基于用户勾选的客观异常完成深度分析：仍需完成截图溯源、权限、队列等最终交付验收"
+    elif selected:
+        draft.report_label = "深度分析草稿：用户已选择异常条目，但大模型未成功参与分析，未达到专业最终交付标准"
+    else:
+        draft.report_label = "第一阶段客观扫描结果：尚未选择需要深挖的异常条目"
+    draft.validation_report = validate_research_draft(draft)
     return draft
 
 
@@ -142,7 +252,7 @@ def audit_evidence(evidence: list[EvidenceItem], target: CompanyProfile, groups:
         AuditFinding(
             topic="真实财务图表覆盖",
             status="pass" if chart_count else "warning",
-            finding=f"已生成 {chart_count} 个真实财务图表，包含 {point_count} 个 SEC XBRL 数据点；每个数据点都保留 SEC accession 来源链接。",
+            finding=f"已生成 {chart_count} 个真实财务图表，包含 {point_count} 个 SEC XBRL / Wind fundamentals 数据点；每个数据点都保留 accession、Wind 字段或原始来源链接。",
             severity="info" if chart_count else "warning",
             related_evidence_ids=[],
         )
@@ -210,22 +320,22 @@ def build_signal_draft(evidence: list[EvidenceItem], target: CompanyProfile, gro
     signals = [
         ResearchSignal(
             title="真实财务数据已进入图表层，但仍需 AI 继续挑选“最值得呈现”的异常维度",
-            conclusion=f"本轮已基于 SEC XBRL 生成 {len(charts)} 个财务图表。它们覆盖收入、利润率/R&D 强度和可比公司横向对比；下一步应在这些真实数据上做纵向边际变化与横向背离扫描，而不是停留在证据目录。",
+            conclusion=f"本轮已基于 SEC XBRL / Wind fundamentals 生成 {len(charts)} 个财务图表。它们覆盖收入、利润率/R&D 强度和可比公司横向对比；下一步应在这些真实数据上做纵向边际变化与横向背离扫描，而不是停留在证据目录。",
             signal_type="亮点：财务数据信号",
             status="evidence_backed" if charts else "data_gap",
             score=SignalScore(5, 5 if charts else 1, 4, 5, 4, 5),
             evidence_ids=official_ids[:6],
             chart_hint="真实财务趋势图 + 可比公司横向柱状图",
             chart_reason="折线/柱状组合可以同时呈现目标公司自身过去季度变化，以及与可比公司的同截面差异。",
-            reasoning_summary="没有真实财务数据图表时，HTML 只能算研究流程草稿；有了 XBRL 数据后，才开始接近投资人可阅读交付物。",
+            reasoning_summary="没有真实财务数据图表时，HTML 只能算研究流程草稿；有了 SEC/Wind 财务数据后，才开始接近投资人可阅读交付物。",
             reasoning_chain=[
-                "从 SEC companyfacts 拉取季度 XBRL 概念数据。",
-                "对 revenue、gross profit、operating income、net income、R&D 等指标按季度归一。",
+                "优先从 SEC companyfacts 拉取季度 XBRL 概念数据；非 SEC 或覆盖不足公司补充 Wind fundamentals。",
+                "对 revenue、gross profit、operating income、net income、R&D 等指标按季度归一，并保留字段来源。",
                 "派生 gross margin、operating margin、R&D/revenue，并生成目标公司趋势和可比公司横向图。",
             ],
             next_validation_actions=[
-                "把 SEC accession 升级为具体 filing 页面、表格位置和截图。",
-                "继续补充非 SEC 公司，如 TSM、SK Hynix、Samsung 的 IR 表格数据。",
+                "把 SEC accession / Wind 字段升级为具体 filing 页面、表格位置和截图。",
+                "继续补充 SK Hynix、Samsung 等非 SEC 公司 IR 表格数据与本地监管公告。",
             ],
         ),
         ResearchSignal(
@@ -314,7 +424,7 @@ def build_signal_draft(evidence: list[EvidenceItem], target: CompanyProfile, gro
 
 def build_next_fetch_plan(evidence: list[EvidenceItem], signals: list[ResearchSignal], groups: list[Any], financial_charts: list[FinancialChart] | None = None) -> list[str]:
     plan = [
-        "对已生成的 SEC XBRL 财务图表做异常扫描：同比/环比、利润率背离、R&D 强度、经营杠杆和可比公司横向排名。",
+        "对已生成的 SEC XBRL / Wind 财务图表做异常扫描：同比/环比、利润率背离、R&D 强度、经营杠杆和可比公司横向排名。",
         "补抓每家核心可比公司最近 4 个季度的 earnings call transcript 与 presentation。",
         "对官方 PDF 执行表格抽取，建立指标-期间-来源页码-单元格映射。",
         "对管理层文字做季度切片，比较需求、供给、价格、库存、客户、CapEx、竞争等关键词簇。",
@@ -323,6 +433,130 @@ def build_next_fetch_plan(evidence: list[EvidenceItem], signals: list[ResearchSi
     if any(signal.status != "evidence_backed" for signal in signals):
         plan.append("对待验证线索自动追加最多 3 轮搜索，并把冲突来源写入证据审计附录。")
     return plan
+
+
+def _ensure_deep_signal_floor(
+    signals: list[ResearchSignal],
+    selected_anomalies: list[ObjectiveAnomaly],
+    fallback_signals: list[ResearchSignal],
+    evidence: list[EvidenceItem],
+) -> list[ResearchSignal]:
+    selected_ids = {anomaly.anomaly_id for anomaly in selected_anomalies}
+    valid = []
+    for signal in signals:
+        if selected_ids and not set(signal.anomaly_ids).intersection(selected_ids):
+            signal.anomaly_ids = [next(iter(selected_ids))]
+        _annotate_signal_source_count(signal, evidence)
+        valid.append(signal)
+
+    combined = list(valid)
+    for signal in _signals_from_selected_anomalies(selected_anomalies, evidence):
+        if len(combined) >= 5:
+            break
+        if not any(existing.title == signal.title for existing in combined):
+            combined.append(signal)
+    for signal in fallback_signals:
+        if len(combined) >= 5:
+            break
+        cloned = ResearchSignal(**{**signal.to_dict(), "score": SignalScore(**{key: value for key, value in signal.score.to_dict().items() if key != "total"})})
+        if selected_ids and not cloned.anomaly_ids:
+            cloned.anomaly_ids = [next(iter(selected_ids))]
+        _annotate_signal_source_count(cloned, evidence)
+        combined.append(cloned)
+
+    combined = _ensure_signal_type_mix(combined, selected_anomalies, evidence)
+    return combined[:8]
+
+
+def _signals_from_selected_anomalies(selected_anomalies: list[ObjectiveAnomaly], evidence: list[EvidenceItem]) -> list[ResearchSignal]:
+    signals: list[ResearchSignal] = []
+    for anomaly in selected_anomalies:
+        evidence_ids = [index for index in anomaly.evidence_ids if 0 <= index < len(evidence)]
+        if not evidence_ids:
+            evidence_ids = _evidence_ids_for_ticker(evidence, anomaly.ticker, limit=6)
+        status = "evidence_backed" if len({evidence[index].source for index in evidence_ids if evidence[index].source}) >= 3 else "needs_validation"
+        signal_type = "积极信号" if anomaly.polarity == "积极信号" else "风险信号"
+        signal = ResearchSignal(
+            title=f"{anomaly.title}：需要解释背后驱动",
+            conclusion=f"{anomaly.observation} 这是一条由客观扫描发现的{signal_type}，下一步应验证它究竟来自需求、价格、产能、客户结构、产品结构、会计口径还是一次性因素。",
+            signal_type=signal_type,
+            status=status,
+            score=SignalScore(5, 3 if status == "needs_validation" else 4, 4, 5, 4, 4),
+            evidence_ids=evidence_ids[:8],
+            anomaly_ids=[anomaly.anomaly_id],
+            chart_hint="纵向趋势图 + 可比公司横向柱状图 + 证据抽屉",
+            chart_reason="该组合能同时验证目标公司自身边际变化、可比公司的同口径差异，以及原始证据是否支持解释。",
+            reasoning_summary="该信号先由确定性数据/资料覆盖扫描产生，再由模型围绕用户勾选条目做解释和验证计划。",
+            reasoning_chain=[
+                f"客观异常：{anomaly.comparison_basis}",
+                f"幅度/现象：{anomaly.magnitude or anomaly.observation}",
+                "优先检查官方披露和业绩会/PPT，再用外部来源做交叉验证。",
+            ],
+            next_validation_actions=[
+                anomaly.suggested_deep_dive or "补充官方原文、业绩会纪要和外部交叉验证来源。",
+                "把每个图表数据点绑定到文件、页码、截图或 Wind/SEC 字段。",
+            ],
+        )
+        _annotate_signal_source_count(signal, evidence)
+        signals.append(signal)
+    return signals
+
+
+def _ensure_signal_type_mix(signals: list[ResearchSignal], selected_anomalies: list[ObjectiveAnomaly], evidence: list[EvidenceItem]) -> list[ResearchSignal]:
+    text = " ".join(f"{signal.signal_type} {signal.title} {signal.conclusion} {signal.status}" for signal in signals)
+    selected_ids = [anomaly.anomaly_id for anomaly in selected_anomalies]
+    default_anomaly_ids = selected_ids[:1]
+    if "积极" not in text and "亮点" not in text:
+        signals.append(_generic_mix_signal("积极信号", "需要从客观异常中寻找正面亮点", "当前模型输出没有覆盖正面亮点，系统自动加入该检查项，防止报告只呈现风险。", default_anomaly_ids, evidence))
+    if "风险" not in text:
+        signals.append(_generic_mix_signal("风险信号", "需要从客观异常中寻找风险信号", "当前模型输出没有覆盖风险项，系统自动加入该检查项，防止报告只报喜不报忧。", default_anomaly_ids, evidence))
+    if "待验证" not in text and "needs_validation" not in text and "线索" not in text:
+        signals.append(_generic_mix_signal("高潜力待验证线索", "需要保留高潜力待验证线索", "证据不足但投资相关性较强的内容应进入待验证区域，并提供继续验证按钮/计划。", default_anomaly_ids, evidence))
+    for signal in signals:
+        _annotate_signal_source_count(signal, evidence)
+    return signals
+
+
+def _generic_mix_signal(signal_type: str, title: str, conclusion: str, anomaly_ids: list[str], evidence: list[EvidenceItem]) -> ResearchSignal:
+    evidence_ids = list(range(min(8, len(evidence))))
+    signal = ResearchSignal(
+        title=title,
+        conclusion=conclusion,
+        signal_type=signal_type,
+        status="needs_validation",
+        score=SignalScore(4, 2, 4, 5, 4, 4),
+        evidence_ids=evidence_ids,
+        anomaly_ids=anomaly_ids,
+        chart_hint="信号覆盖审计卡片",
+        chart_reason="用于提醒用户当前模型输出类型不完整，不能作为最终交付物。",
+        reasoning_summary="这是输出合同守门员生成的补充信号，不是最终结论。",
+        reasoning_chain=["检查模型输出是否同时覆盖积极、风险、待验证三类。", "缺失类别时自动补入审计信号，避免误导用户。"],
+        next_validation_actions=["重新选择更多客观异常，或执行下一轮资料抓取后再次调用模型。"],
+    )
+    _annotate_signal_source_count(signal, evidence)
+    return signal
+
+
+def _evidence_ids_for_ticker(evidence: list[EvidenceItem], ticker: str, limit: int) -> list[int]:
+    ticker = (ticker or "").upper()
+    if ticker:
+        ids = [index for index, item in enumerate(evidence) if item.ticker.upper() == ticker]
+        if ids:
+            return ids[:limit]
+    return list(range(min(limit, len(evidence))))
+
+
+def _annotate_signal_source_count(signal: ResearchSignal, evidence: list[EvidenceItem]) -> None:
+    valid_ids = [index for index in signal.evidence_ids if 0 <= index < len(evidence)]
+    signal.evidence_ids = valid_ids[:10]
+    signal.source_count = len({evidence[index].source for index in valid_ids if evidence[index].source})
+    if signal.status == "evidence_backed" and signal.source_count < 3:
+        signal.status = "needs_validation"
+
+
+def _annotate_and_downgrade_weak_strong_signals(signals: list[ResearchSignal], evidence: list[EvidenceItem]) -> None:
+    for signal in signals:
+        _annotate_signal_source_count(signal, evidence)
 
 
 def _selected_companies(target: CompanyProfile, groups: list[Any], max_companies: int) -> list[CompanyProfile]:

@@ -5,9 +5,10 @@ from typing import Any
 
 import streamlit as st
 
+from src.research_anomalies import POSITIVE, RISK
 from src.research_html import save_dashboard_html, save_memo_html
 from src.research_llm import deepseek_key_status
-from src.research_pipeline import collect_research_draft
+from src.research_pipeline import collect_research_draft, run_deep_analysis_for_selected_anomalies
 from src.research_storage import (
     create_research_job,
     is_supabase_configured,
@@ -29,6 +30,7 @@ def init_state() -> None:
     st.session_state.setdefault("selected_groups", st.session_state.base_groups)
     st.session_state.setdefault("research_job", None)
     st.session_state.setdefault("research_draft", None)
+    st.session_state.setdefault("selected_anomaly_ids", [])
     st.session_state.setdefault("memo_path", "")
     st.session_state.setdefault("dashboard_path", "")
 
@@ -122,13 +124,12 @@ def render_comparable_editor() -> list[Any]:
 
 
 def render_task_runner(user_id: str, claude_api_key: str, deepseek_api_key: str, selected_groups: list[Any]) -> None:
-    st.subheader("3. 提交任务 → 进度 → 证据审计与信号草稿")
+    st.subheader("3. 第一阶段：客观扫描 → 异常清单")
+    st.caption("第一阶段只做客观工作：找信息、横纵向对比、列出异常。不调用大模型做主观深度判断，先让你选择哪些值得挖。")
     include_external_search = st.checkbox("启用外部公开信息搜索（媒体、平台、私有玩家线索）", value=True)
     capture_screenshots = st.checkbox("为关键证据生成网页/PDF 截图", value=True)
-    enable_llm = st.checkbox("启用 DeepSeek 大模型完成信号分析", value=True)
-    require_llm = st.checkbox("启用后必须成功调用 DeepSeek，否则标记失败", value=True)
     max_companies = st.slider("本轮最多抓取研究对象数", min_value=4, max_value=20, value=12, help="原型阶段建议先控制数量，避免单次运行过慢。")
-    if st.button("生成证据审计和信号草稿", type="primary", use_container_width=True):
+    if st.button("开始客观扫描并生成异常清单", type="primary", use_container_width=True):
         job = create_research_job(
             user_id=user_id,
             target=st.session_state.target_query,
@@ -137,6 +138,7 @@ def render_task_runner(user_id: str, claude_api_key: str, deepseek_api_key: str,
         )
         st.session_state.research_job = job
         st.session_state.research_draft = None
+        st.session_state.selected_anomaly_ids = []
         log_research_event(user_id, "research_job_submitted", metadata={"job_id": job["id"], "target": st.session_state.target_query})
 
         progress = st.progress(0, text="任务已提交：准备可比组与证据源")
@@ -149,8 +151,8 @@ def render_task_runner(user_id: str, claude_api_key: str, deepseek_api_key: str,
                     comparable_groups=selected_groups,
                     claude_api_key=claude_api_key,
                     deepseek_api_key=deepseek_api_key,
-                    require_llm=require_llm,
-                    enable_llm=enable_llm,
+                    require_llm=False,
+                    enable_llm=False,
                     include_external_search=include_external_search,
                     max_companies=max_companies,
                     capture_screenshots=capture_screenshots,
@@ -158,33 +160,33 @@ def render_task_runner(user_id: str, claude_api_key: str, deepseek_api_key: str,
                     user_id=user_id,
                     job_id=job["id"],
                 )
-            progress.progress(88, text="生成证据审计、模型记录与自动验收清单")
+            progress.progress(88, text="生成客观异常清单、证据审计与自动验收清单")
             st.session_state.research_draft = draft
-            log_research_event(user_id, "research_draft_ready", metadata={"job_id": job["id"], "evidence_count": len(draft.evidence)})
-            progress.progress(100, text="完成：请审阅草稿和自动验收清单")
-            if any(run.status == "success" for run in draft.model_runs):
-                st.success("DeepSeek 大模型已成功参与本轮信号分析。")
-            else:
-                st.error("DeepSeek 大模型未成功参与本轮分析；请查看自动验收清单和模型运行记录。")
+            log_research_event(user_id, "objective_scan_ready", metadata={"job_id": job["id"], "evidence_count": len(draft.evidence), "anomaly_count": len(draft.objective_anomalies)})
+            progress.progress(100, text="完成：请勾选需要深挖的异常条目")
+            st.success("第一阶段客观扫描完成。请在下方勾选需要进一步深挖的积极信号或风险信号。")
         except Exception as exc:
             progress.empty()
             st.error(f"任务失败：{exc}")
 
 
-def render_draft_review(user_id: str) -> None:
+def render_draft_review(user_id: str, deepseek_api_key: str) -> None:
     draft = st.session_state.research_draft
     if not draft:
         return
 
-    st.subheader("4. 审阅草稿")
+    st.subheader("4. 选择需要深挖的客观异常")
     st.warning(draft.report_label)
     summary_cols = st.columns(4)
     summary_cols[0].metric("候选证据", len(draft.evidence))
-    summary_cols[1].metric("信号草稿", len(draft.signals))
+    summary_cols[1].metric("客观异常", len(draft.objective_anomalies))
     summary_cols[2].metric("真实财务图表", len(draft.financial_charts))
     summary_cols[3].metric("审计项", len(draft.audit_findings))
 
-    tab_checklist, tab_models, tab_charts, tab_signals, tab_audit, tab_evidence, tab_plan = st.tabs(["自动验收清单", "模型运行记录", "真实财务图表", "信号草稿", "证据审计", "候选证据", "下一步验证"])
+    render_anomaly_selector(user_id, deepseek_api_key)
+
+    st.subheader("5. 审阅深度分析与证据")
+    tab_checklist, tab_models, tab_charts, tab_signals, tab_audit, tab_evidence, tab_plan = st.tabs(["自动验收清单", "模型运行记录", "真实财务图表", "深度分析信号", "证据审计", "候选证据", "下一步验证"])
     with tab_checklist:
         if draft.validation_report:
             status = draft.validation_report.status
@@ -250,7 +252,7 @@ def render_draft_review(user_id: str) -> None:
                 for note in draft.run_notes:
                     st.caption(note)
 
-    st.subheader("5. 你确认后生成 HTML")
+    st.subheader("6. 你确认后生成 HTML")
     passed_final = bool(draft.validation_report and draft.validation_report.status == "PASS_FINAL_DELIVERABLE")
     if not passed_final:
         st.error("自动验收未通过：只能生成“内测草稿 HTML”，不能标记为最终交付物。")
@@ -272,6 +274,86 @@ def render_draft_review(user_id: str) -> None:
             st.success(f"已生成：{path}")
 
     render_downloads()
+
+
+def render_anomaly_selector(user_id: str, deepseek_api_key: str) -> None:
+    draft = st.session_state.research_draft
+    if not draft:
+        return
+    anomalies = draft.objective_anomalies
+    if not anomalies:
+        st.info("暂未形成客观异常条目。可以扩大可比公司数量、启用外部搜索，或补充更多官方文件后重试。")
+        return
+
+    positive = [item for item in anomalies if item.polarity == POSITIVE]
+    risk = [item for item in anomalies if item.polarity == RISK]
+    st.caption("这些条目来自纯客观扫描：财务图表横纵向变化、可比公司排名、资料覆盖缺口/优势。你勾选后，大模型只围绕被选条目做深度分析。")
+    col_pos, col_risk, col_selected = st.columns(3)
+    col_pos.metric("积极信号", len(positive))
+    col_risk.metric("风险信号", len(risk))
+    col_selected.metric("已勾选", len(st.session_state.selected_anomaly_ids))
+
+    selected: list[str] = []
+    tab_positive, tab_risk = st.tabs(["积极信号", "风险信号"])
+    with tab_positive:
+        selected.extend(_render_anomaly_group("positive", positive))
+    with tab_risk:
+        selected.extend(_render_anomaly_group("risk", risk))
+    st.session_state.selected_anomaly_ids = selected
+
+    with st.container(border=True):
+        st.markdown("**第二阶段：基于你勾选的异常做深度分析**")
+        st.caption("这一阶段才调用大模型：分析背后原因、验证路径、图表表达方式和后续抓取计划。")
+        require_llm = st.checkbox("必须成功调用 DeepSeek，否则标记为失败", value=True, key="require_llm_deep_analysis")
+        disabled = not selected
+        if st.button("对已勾选异常进行深度分析", type="primary", disabled=disabled, use_container_width=True):
+            with st.spinner("正在围绕已勾选异常做深度分析。请稍等，这一步会调用大模型…"):
+                updated = run_deep_analysis_for_selected_anomalies(
+                    draft,
+                    selected_anomaly_ids=selected,
+                    deepseek_api_key=deepseek_api_key,
+                    require_llm=require_llm,
+                )
+            st.session_state.research_draft = updated
+            log_research_event(
+                user_id,
+                "selected_anomaly_deep_analysis_ready",
+                metadata={"job_id": _job_id(), "selected_anomaly_ids": selected, "model_runs": len(updated.model_runs)},
+            )
+            if any(run.status == "success" for run in updated.model_runs):
+                st.success("深度分析完成：DeepSeek 已围绕你勾选的异常生成分析信号。")
+            else:
+                st.error("深度分析未成功调用大模型；请检查 DeepSeek Key 或模型运行记录。")
+
+
+def _render_anomaly_group(prefix: str, anomalies: list[Any]) -> list[str]:
+    if not anomalies:
+        st.info("暂无此类异常。")
+        return []
+    selected: list[str] = []
+    select_all = st.checkbox("全选本类异常", value=False, key=f"{prefix}_select_all_anomalies")
+    for anomaly in anomalies:
+        default_checked = select_all or anomaly.selected_for_deep_dive or anomaly.anomaly_id in st.session_state.selected_anomaly_ids
+        with st.container(border=True):
+            checked = st.checkbox(
+                anomaly.title,
+                value=default_checked,
+                key=f"{prefix}_anomaly_{anomaly.anomaly_id}",
+            )
+            st.markdown(f"**观察：** {anomaly.observation}")
+            st.markdown(f"**对比依据：** {anomaly.comparison_basis}")
+            if anomaly.magnitude:
+                st.markdown(f"**幅度：** {anomaly.magnitude}")
+            st.caption(f"{anomaly.category} · {anomaly.ticker or '多公司/资料'} · {anomaly.period or '当前窗口'} · 置信度：{anomaly.confidence_tier}")
+            if anomaly.suggested_deep_dive:
+                st.info(f"建议深挖：{anomaly.suggested_deep_dive}")
+            if anomaly.source_refs:
+                with st.expander("来源字段 / 链接"):
+                    for ref in anomaly.source_refs[:5]:
+                        st.caption(ref)
+        if checked:
+            selected.append(anomaly.anomaly_id)
+    return selected
 
 
 def render_downloads() -> None:
@@ -304,7 +386,7 @@ def main() -> None:
     st.divider()
     render_task_runner(user_id, claude_api_key, deepseek_api_key, selected_groups)
     st.divider()
-    render_draft_review(user_id)
+    render_draft_review(user_id, deepseek_api_key)
     st.caption("V0.1 原型：同步执行任务并模拟任务队列。下一阶段会接入真正后台队列、微信登录/通知、权限管理和访问行为日志。")
 
 

@@ -10,7 +10,7 @@ from typing import Any
 
 import requests
 
-from .research_models import ComparableGroup, EvidenceItem, FinancialChart, ModelRunRecord, ResearchSignal, SignalScore
+from .research_models import ComparableGroup, EvidenceItem, FinancialChart, ModelRunRecord, ObjectiveAnomaly, ResearchSignal, SignalScore
 
 
 DEEPSEEK_BASE_URL = "https://api.deepseek.com"
@@ -38,6 +38,7 @@ def generate_deepseek_research_signals(
     comparable_groups: list[ComparableGroup],
     evidence: list[EvidenceItem],
     financial_charts: list[FinancialChart],
+    selected_anomalies: list[ObjectiveAnomaly] | None = None,
     fallback_signals: list[ResearchSignal],
     timeout: int = 180,
 ) -> tuple[list[ResearchSignal], list[str], ModelRunRecord]:
@@ -46,13 +47,13 @@ def generate_deepseek_research_signals(
     run = ModelRunRecord(
         provider="deepseek",
         model=DEEPSEEK_MODEL,
-        purpose="Generate evidence-grounded alpha signals from collected financial charts, comparables, and source evidence.",
+        purpose="Deep-analyze user-selected objective anomalies using collected financial charts, comparables, and source evidence.",
         status="attempted",
         started_at=started.strftime("%Y-%m-%d %H:%M:%S"),
         prompt_summary=f"target={target_name}; quarters={quarter_count}; evidence={len(evidence)}; charts={len(financial_charts)}",
     )
     try:
-        payload = _build_payload(target_name, quarter_count, comparable_groups, evidence, financial_charts, fallback_signals)
+        payload = _build_payload(target_name, quarter_count, comparable_groups, evidence, financial_charts, selected_anomalies or [], fallback_signals)
         response, compatibility_mode, retry_notes = _post_chat_completion(api_key, payload, timeout)
         data = response.json()
         content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
@@ -67,6 +68,7 @@ def generate_deepseek_research_signals(
             comparable_groups=comparable_groups,
             evidence=evidence,
             financial_charts=financial_charts,
+            selected_anomalies=selected_anomalies or [],
             fallback_signals=fallback_signals,
             current_signals=signals,
             current_plan=next_plan,
@@ -193,25 +195,30 @@ def _build_payload(
     comparable_groups: list[ComparableGroup],
     evidence: list[EvidenceItem],
     financial_charts: list[FinancialChart],
+    selected_anomalies: list[ObjectiveAnomaly],
     fallback_signals: list[ResearchSignal],
 ) -> dict[str, Any]:
     system = (
-        "You are a senior buy-side/industry research analyst. "
+        "你是一名资深二级市场/产业研究员。第一版产品面向中文用户，必须优先使用专业、清晰的中文表达。"
         "Use only the supplied evidence and chart data. Do not invent facts. "
+        "The user has already selected objective anomalies for deep dive. Focus on those selected anomalies only. "
         "If evidence is weak, mark the signal as needs_validation. "
         "Return strict JSON only."
     )
     user = {
-        "task": "Generate 5-8 evidence-grounded alpha signals for an AI industry-chain research report.",
+        "task": "围绕用户勾选的客观异常条目，生成中文深度分析信号；不要重新泛泛挑选指标。",
         "target": target_name,
         "quarter_count": quarter_count,
         "rules": [
-            "Signals must include positive highlights, risks, and high-potential validation leads.",
+            "输出语言必须是中文，标题、结论、推理摘要、下一步验证动作都用中文。",
+            "每个深度分析信号必须对应至少一个 selected_anomalies 中的 anomaly_id。",
+            "积极信号和风险信号要分清楚；证据不足时标为 needs_validation。",
             "Each signal must reference evidence_ids and explain chart choice.",
             "Do not claim unsupported facts. Use needs_validation for hypotheses.",
             "Prefer signals that combine vertical company trend and horizontal peer/cross-chain comparison.",
             "Return JSON with keys: signals, next_fetch_plan.",
         ],
+        "selected_objective_anomalies": [anomaly.to_dict() for anomaly in selected_anomalies],
         "comparable_groups": [
             {
                 "group_id": group.group_id,
@@ -238,7 +245,7 @@ def _build_payload(
                 {
                     "title": "string",
                     "conclusion": "string",
-                    "signal_type": "亮点|风险|高潜力待验证线索",
+                    "signal_type": "积极信号|风险信号|高潜力待验证线索",
                     "status": "evidence_backed|needs_validation|data_gap",
                     "score": {
                         "importance": "1-5 integer",
@@ -249,6 +256,7 @@ def _build_payload(
                         "actionability": "1-5 integer",
                     },
                     "evidence_ids": "array of integer ids from supplied evidence",
+                    "anomaly_ids": "array of anomaly_id strings from selected_objective_anomalies",
                     "chart_hint": "string",
                     "chart_reason": "string",
                     "reasoning_summary": "string",
@@ -392,6 +400,7 @@ def _ensure_signal_contract(
     comparable_groups: list[ComparableGroup],
     evidence: list[EvidenceItem],
     financial_charts: list[FinancialChart],
+    selected_anomalies: list[ObjectiveAnomaly],
     fallback_signals: list[ResearchSignal],
     current_signals: list[ResearchSignal],
     current_plan: list[str],
@@ -400,7 +409,7 @@ def _ensure_signal_contract(
     ok, reason = _signal_contract_status(current_signals)
     if ok:
         return current_signals, current_plan, ""
-    repair_payload = _build_payload(target_name, quarter_count, comparable_groups, evidence, financial_charts, fallback_signals)
+    repair_payload = _build_payload(target_name, quarter_count, comparable_groups, evidence, financial_charts, selected_anomalies, fallback_signals)
     repair_payload["messages"].append(
         {
             "role": "assistant",
@@ -419,7 +428,7 @@ def _ensure_signal_contract(
             "content": (
                 f"The previous answer failed the output contract: {reason}. "
                 "Return a corrected strict JSON object with 5-8 signals. "
-                "It must include at least one positive highlight, one risk, and one high-potential validation lead. "
+                "It must use Chinese, focus on selected objective anomalies, and include positive/risk classification where applicable. "
                 "Use only supplied evidence/chart data and keep evidence_ids valid integers."
             ),
         }
@@ -485,19 +494,28 @@ def _signals_from_payload(payload: dict[str, Any], evidence: list[EvidenceItem])
                 continue
             if 0 <= index < len(evidence):
                 evidence_ids.append(index)
+        raw_anomaly_ids = item.get("anomaly_ids", [])
+        anomaly_ids = [str(value) for value in raw_anomaly_ids if str(value).strip()] if isinstance(raw_anomaly_ids, list) else []
+        valid_evidence_ids = evidence_ids[:10]
+        source_count = len({evidence[index].source for index in valid_evidence_ids if 0 <= index < len(evidence) and evidence[index].source})
+        status = _status_value(str(item.get("status") or ""))
+        if status == "evidence_backed" and source_count < 3:
+            status = "needs_validation"
         signals.append(
             ResearchSignal(
                 title=str(item.get("title") or "未命名信号"),
                 conclusion=str(item.get("conclusion") or ""),
                 signal_type=str(item.get("signal_type") or "高潜力待验证线索"),
-                status=_status_value(str(item.get("status") or "")),
+                status=status,
                 score=score,
-                evidence_ids=evidence_ids[:10],
+                evidence_ids=valid_evidence_ids,
+                anomaly_ids=anomaly_ids[:10],
                 chart_hint=str(item.get("chart_hint") or ""),
                 chart_reason=str(item.get("chart_reason") or ""),
                 reasoning_summary=str(item.get("reasoning_summary") or ""),
                 reasoning_chain=_string_list(item.get("reasoning_chain"), limit=6),
                 next_validation_actions=_string_list(item.get("next_validation_actions"), limit=6),
+                source_count=source_count,
             )
         )
     return signals

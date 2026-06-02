@@ -129,7 +129,16 @@ def discover_platform_links(
     name = company.get("name") or ""
     english = company.get("name_en") or ""
     ticker = company.get("ticker") or company.get("local_code") or ""
-    is_china = str(company.get("market", "")) in {"港股", "A股", "沪深"} or "中国" in str(company.get("country", ""))
+    china_text = " ".join(
+        str(company.get(key, ""))
+        for key in ["market", "country", "name", "name_en", "ticker", "description"]
+    )
+    is_china = (
+        str(company.get("market", "")) in {"港股", "A股", "沪深"}
+        or "中国" in str(company.get("country", ""))
+        or any(token in china_text.casefold() for token in ["china", "hong kong", "taiwan", "smic", "tsmc"])
+        or any(token in china_text for token in ["中国", "香港", "台湾", "中芯", "台积电"])
+    )
     query = (name or " ".join(part for part in [english, ticker] if part)).strip() if is_china else " ".join(part for part in [english or name, ticker] if part).strip()
     if not query:
         return []
@@ -148,7 +157,7 @@ def discover_platform_links(
             jobs.append((_search, (template.format(query=query_with_date, domain=domain), source, "presentation", 3), {}))
     market = str(company.get("market", ""))
     country = str(company.get("country", ""))
-    if market in {"港股", "A股", "沪深"} or "中国" in country or name:
+    if market in {"港股", "A股", "沪深"} or "中国" in country or is_china:
         for source, template in CHINA_PLATFORM_SOURCES:
             kind = "presentation" if "PDF" in template else "transcript"
             if selected and kind not in selected and not (kind == "transcript" and "quarterly" in selected):

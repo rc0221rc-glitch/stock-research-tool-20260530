@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import Counter
 
+from .research_anomalies import POSITIVE, RISK
 from .research_models import ResearchDraft, ValidationCheck, ValidationReport
 
 
@@ -12,13 +13,16 @@ MIN_EVIDENCE = 60
 MIN_COMPANIES = 5
 MIN_MODEL_RUNS = 1
 MIN_MODEL_PROVIDERS_FOR_PRO_MODE = 3
+MIN_SELECTED_SIGNAL_LINKAGE = 1
 
 
 def validate_research_draft(draft: ResearchDraft) -> ValidationReport:
     checks = [
+        _check_final_stage_readiness(draft),
         _check_model_called(draft),
         _check_deep_research_runtime(draft),
         _check_multi_model_attempts(draft),
+        _check_two_stage_anomaly_workflow(draft),
         _check_financial_charts(draft),
         _check_peer_comparables(draft),
         _check_source_traceability(draft),
@@ -26,6 +30,7 @@ def validate_research_draft(draft: ResearchDraft) -> ValidationReport:
         _check_table_cell_traceability(draft),
         _check_signal_count(draft),
         _check_signal_types(draft),
+        _check_selected_anomaly_signal_linkage(draft),
         _check_evidence_audit(draft),
         _check_three_source_validation(draft),
         _check_transcript_and_presentation(draft),
@@ -40,7 +45,7 @@ def validate_research_draft(draft: ResearchDraft) -> ValidationReport:
     failed = sum(1 for check in checks if check.status == "fail" and check.severity == "must")
     warning = sum(1 for check in checks if check.status in {"warn", "fail"} and check.severity != "must")
     passed = sum(1 for check in checks if check.status == "pass")
-    status = "PASS_FINAL_DELIVERABLE" if failed == 0 else "NOT_FINAL_DELIVERABLE"
+    status = "PASS_FINAL_DELIVERABLE" if failed == 0 and warning == 0 else "NOT_FINAL_DELIVERABLE"
     return ValidationReport(status=status, passed=passed, failed=failed, warning=warning, checks=checks)
 
 
@@ -56,7 +61,34 @@ def checklist_markdown(report: ValidationReport) -> str:
     return "\n".join(lines)
 
 
+def _check_final_stage_readiness(draft: ResearchDraft) -> ValidationCheck:
+    stage = (draft.run_metadata or {}).get("workflow_stage", "")
+    selected_count = len((draft.run_metadata or {}).get("selected_anomaly_ids", []))
+    successful_model_runs = len([run for run in draft.model_runs if run.status == "success"])
+    ok = stage in {"model_deep_analysis", "deep_analysis_ready"} and selected_count > 0 and successful_model_runs > 0
+    return _check(
+        "final_stage_readiness",
+        "最终阶段状态",
+        "最终 HTML 必须完成：客观异常清单 → 用户勾选 → 大模型围绕勾选异常深度分析；第一阶段扫描不能标记为最终交付。",
+        ok,
+        f"workflow_stage={stage or '无'}；已勾选异常 {selected_count} 个；成功模型调用 {successful_model_runs} 次。",
+        "必须处于 model_deep_analysis，且有 selected_anomaly_ids 和成功模型调用记录。",
+        "请在第一阶段勾选异常后运行第二阶段深度分析，再生成最终候选 HTML。",
+    )
+
+
 def _check_model_called(draft: ResearchDraft) -> ValidationCheck:
+    if _is_objective_scan_stage(draft):
+        return _check(
+            "model_called",
+            "大模型调用",
+            "第一阶段只做客观异常扫描，不应强制调用大模型；第二阶段深度分析才需要模型记录。",
+            True,
+            "当前处于 objective_scan_ready，未调用大模型是符合设计的。",
+            "第一阶段无需模型调用；最终深度分析阶段至少 1 次成功模型调用。",
+            "",
+            severity="stage",
+        )
     successful = [run for run in draft.model_runs if run.status == "success"]
     return _check(
         "model_called",
@@ -70,6 +102,17 @@ def _check_model_called(draft: ResearchDraft) -> ValidationCheck:
 
 
 def _check_deep_research_runtime(draft: ResearchDraft) -> ValidationCheck:
+    if _is_objective_scan_stage(draft):
+        return _check(
+            "deep_research_runtime",
+            "深度研究时长",
+            "第一阶段先输出客观异常清单；专业版深度研究时长在用户勾选后计算。",
+            True,
+            "当前处于 objective_scan_ready，尚未进入深度分析。",
+            f"第二阶段专业版目标至少 {FINAL_MIN_SECONDS // 60} 分钟研究/验证运行记录。",
+            "",
+            severity="stage",
+        )
     total_seconds = sum(run.duration_seconds for run in draft.model_runs)
     return _check(
         "deep_research_runtime",
@@ -79,10 +122,22 @@ def _check_deep_research_runtime(draft: ResearchDraft) -> ValidationCheck:
         f"记录模型/研究运行时长 {total_seconds:.1f} 秒。",
         f"专业版目标至少 {FINAL_MIN_SECONDS // 60} 分钟研究/验证运行记录。",
         "接入后台任务队列，分阶段执行资料抓取、模型分析、二次验证和审计。",
+        severity="architecture",
     )
 
 
 def _check_multi_model_attempts(draft: ResearchDraft) -> ValidationCheck:
+    if _is_objective_scan_stage(draft):
+        return _check(
+            "multi_model_attempts",
+            "多模型尝试",
+            "多模型深度研究应发生在用户勾选异常之后。",
+            True,
+            "当前处于 objective_scan_ready，未进入多模型深度分析。",
+            "第二阶段至少 3 个供应商尝试记录。",
+            "",
+            severity="stage",
+        )
     providers = {run.provider for run in draft.model_runs if run.status in {"success", "attempted"}}
     return _check(
         "multi_model_attempts",
@@ -92,6 +147,7 @@ def _check_multi_model_attempts(draft: ResearchDraft) -> ValidationCheck:
         f"记录到 {len(providers)} 个模型供应商：{', '.join(sorted(providers)) or '无'}。",
         "至少 3 个供应商尝试记录；不可硬编码不存在的模型名。",
         "增加模型可用性检测和 provider abstraction，再记录实际调用结果。",
+        severity="architecture",
     )
 
 
@@ -104,6 +160,22 @@ def _check_financial_charts(draft: ResearchDraft) -> ValidationCheck:
         f"当前财务图表 {len(draft.financial_charts)} 个。",
         f"至少 {MIN_FINANCIAL_CHARTS} 个核心财务/经营/比率/横向可比图表。",
         "继续补经营数据、分部数据、同比/环比、估值/CapEx/库存/backlog 等图表。",
+    )
+
+
+def _check_two_stage_anomaly_workflow(draft: ResearchDraft) -> ValidationCheck:
+    selected_count = len([item for item in draft.objective_anomalies if item.selected_for_deep_dive])
+    positive_count = len([item for item in draft.objective_anomalies if item.polarity == POSITIVE])
+    risk_count = len([item for item in draft.objective_anomalies if item.polarity == RISK])
+    ok = bool(draft.objective_anomalies) and positive_count + risk_count == len(draft.objective_anomalies)
+    return _check(
+        "two_stage_anomaly_workflow",
+        "两阶段异常选择",
+        "工具应先输出积极/风险客观异常清单，由用户勾选后再进入深度分析。",
+        ok,
+        f"客观异常 {len(draft.objective_anomalies)} 条；积极 {positive_count} 条；风险 {risk_count} 条；已勾选 {selected_count} 条。",
+        "至少形成积极/风险分类的客观异常清单；第二阶段记录 selected_for_deep_dive。",
+        "完善横纵向异常扫描器，并在 Streamlit 中提供勾选入口。",
     )
 
 
@@ -122,7 +194,7 @@ def _check_peer_comparables(draft: ResearchDraft) -> ValidationCheck:
 
 def _check_source_traceability(draft: ResearchDraft) -> ValidationCheck:
     financial_points = [point for chart in draft.financial_charts for point in chart.points]
-    linked = [point for point in financial_points if point.sources and point.sources[0].url]
+    linked = [point for point in financial_points if point.sources and (point.sources[0].url or point.sources[0].accession)]
     evidence_with_links = [item for item in draft.evidence if item.url]
     ok = bool(financial_points) and len(linked) == len(financial_points) and len(evidence_with_links) >= MIN_EVIDENCE
     return _check(
@@ -130,8 +202,8 @@ def _check_source_traceability(draft: ResearchDraft) -> ValidationCheck:
         "来源可追溯",
         "图表点和文字证据必须可追溯到原始文件/网页。",
         ok,
-        f"财务点 {len(financial_points)} 个，其中 {len(linked)} 个有 SEC 链接；证据链接 {len(evidence_with_links)} 条。",
-        "所有图表点有来源链接，候选证据不少于 60 条。",
+        f"财务点 {len(financial_points)} 个，其中 {len(linked)} 个有 SEC/Wind 来源；证据链接 {len(evidence_with_links)} 条。",
+        "所有图表点有来源链接或 Wind 字段来源，候选证据不少于 60 条。",
         "把所有文字结论绑定 evidence_ids，并补足网页/PDF 来源。",
     )
 
@@ -154,15 +226,26 @@ def _check_table_cell_traceability(draft: ResearchDraft) -> ValidationCheck:
     return _check(
         "table_cell_traceability",
         "表格单元格来源",
-        "财务图表数据应能追溯到表格单元格或 XBRL concept。",
+        "财务图表数据应能追溯到表格单元格、XBRL concept 或 Wind 字段。",
         bool(cells) or all(point.sources and point.sources[0].concept for chart in draft.financial_charts for point in chart.points),
-        f"证据表格单元格 {len(cells)} 条；财务点使用 XBRL concept 溯源。",
-        "表格数据应有 cell_reference；XBRL 数据应有 concept/accession。",
+        f"证据表格单元格 {len(cells)} 条；财务点使用 XBRL concept 或 Wind 字段溯源。",
+        "表格数据应有 cell_reference；XBRL/Wind 数据应有 concept/accession。",
         "对 PDF/HTML 表格抽取结果补 cell_reference 映射。",
     )
 
 
 def _check_signal_count(draft: ResearchDraft) -> ValidationCheck:
+    if _is_objective_scan_stage(draft):
+        return _check(
+            "signal_count",
+            "核心信号数量",
+            "第一阶段展示客观异常清单；深度分析信号在用户勾选后生成。",
+            True,
+            f"当前客观异常 {len(draft.objective_anomalies)} 条，深度分析信号 {len(draft.signals)} 个。",
+            "第二阶段应输出 5–8 个核心深度分析信号。",
+            "",
+            severity="stage",
+        )
     return _check(
         "signal_count",
         "核心信号数量",
@@ -175,6 +258,19 @@ def _check_signal_count(draft: ResearchDraft) -> ValidationCheck:
 
 
 def _check_signal_types(draft: ResearchDraft) -> ValidationCheck:
+    if _is_objective_scan_stage(draft):
+        has_positive = any(item.polarity == POSITIVE for item in draft.objective_anomalies)
+        has_risk = any(item.polarity == RISK for item in draft.objective_anomalies)
+        return _check(
+            "signal_types",
+            "积极/风险异常分类",
+            "第一阶段必须把客观异常分为积极信号和风险信号。",
+            has_positive or has_risk,
+            f"积极异常={has_positive}，风险异常={has_risk}。",
+            "至少包含积极或风险异常；理想情况下两类都覆盖。",
+            "继续完善财务与资料覆盖异常扫描。",
+            severity="stage",
+        )
     text = " ".join(f"{signal.signal_type} {signal.title} {signal.conclusion}" for signal in draft.signals)
     has_positive = any(token in text for token in ["亮点", "增长", "优于", "positive", "increased"])
     has_risk = any(token in text for token in ["风险", "下滑", "弱于", "risk", "decreased"])
@@ -187,6 +283,35 @@ def _check_signal_types(draft: ResearchDraft) -> ValidationCheck:
         f"亮点={has_positive}，风险={has_risk}，待验证={has_hypothesis}。",
         "同时包含亮点、风险、待验证假设。",
         "让模型按统一评分体系分类输出信号。",
+    )
+
+
+def _check_selected_anomaly_signal_linkage(draft: ResearchDraft) -> ValidationCheck:
+    if _is_objective_scan_stage(draft):
+        return _check(
+            "selected_anomaly_signal_linkage",
+            "信号绑定已勾选异常",
+            "第一阶段尚未生成深度分析信号，不检查信号与已勾选异常的绑定。",
+            True,
+            "当前处于 objective_scan_ready。",
+            "第二阶段每个核心信号都应绑定至少一个已勾选 anomaly_id。",
+            "",
+            severity="stage",
+        )
+    selected_ids = set((draft.run_metadata or {}).get("selected_anomaly_ids", []))
+    linked = [
+        signal
+        for signal in draft.signals
+        if not selected_ids or set(signal.anomaly_ids).intersection(selected_ids)
+    ]
+    return _check(
+        "selected_anomaly_signal_linkage",
+        "信号绑定已勾选异常",
+        "深度分析必须围绕用户勾选的客观异常，而不是重新泛泛生成指标结论。",
+        len(linked) >= min(MIN_SELECTED_SIGNAL_LINKAGE, len(draft.signals)) and (not draft.signals or len(linked) == len(draft.signals)),
+        f"已勾选异常 {len(selected_ids)} 个；深度信号 {len(draft.signals)} 个；绑定到已勾选异常 {len(linked)} 个。",
+        "每个深度分析信号都应包含已勾选 anomaly_id。",
+        "在 LLM 输出合同和回退信号生成中强制写入 anomaly_ids。",
     )
 
 
@@ -204,13 +329,15 @@ def _check_evidence_audit(draft: ResearchDraft) -> ValidationCheck:
 
 def _check_three_source_validation(draft: ResearchDraft) -> ValidationCheck:
     source_count = len({item.source for item in draft.evidence if item.source})
+    strong_signals = [signal for signal in draft.signals if signal.status == "evidence_backed"]
+    weak_strong_signals = [signal for signal in strong_signals if getattr(signal, "source_count", 0) < 3]
     return _check(
         "three_source_validation",
         "三方交叉验证",
         "强结论至少需要三个独立可信来源交叉验证。",
-        source_count >= 3,
-        f"当前来源名称 {source_count} 个。",
-        "至少 3 个独立来源；强结论需绑定多来源。",
+        source_count >= 3 and not weak_strong_signals,
+        f"当前来源名称 {source_count} 个；强结论 {len(strong_signals)} 个，其中来源不足 3 个的强结论 {len(weak_strong_signals)} 个。",
+        "至少 3 个独立来源；每条 evidence_backed 强结论需绑定不少于 3 个独立来源，否则应降级为待验证。",
         "在 signal 层记录每条结论的独立来源数量。",
     )
 
@@ -244,6 +371,17 @@ def _check_external_sources(draft: ResearchDraft) -> ValidationCheck:
 def _check_private_company_evidence(draft: ResearchDraft) -> ValidationCheck:
     private_groups = [group for group in draft.comparable_groups if any(not company.is_public for company in group.companies)]
     private_evidence = [item for item in draft.evidence if item.ticker in {"OPENAI", "ANTHROPIC", "XAI"}]
+    if not _is_ai_chain_research(draft):
+        return _check(
+            "private_company_evidence",
+            "私有模型公司观察",
+            "非 AI 产业链目标不强制纳入私有模型公司；AI 产业链研究必须纳入。",
+            True,
+            "当前目标不属于 AI 产业链强制场景。",
+            "AI 产业链研究需包含私有玩家分组和至少 3 条相关证据。",
+            "",
+            severity="stage",
+        )
     return _check(
         "private_company_evidence",
         "私有模型公司观察",
@@ -295,6 +433,7 @@ def _check_async_task_queue(draft: ResearchDraft) -> ValidationCheck:
         f"任务模式={metadata.get('task_mode', '未知')}；job_id={metadata.get('job_id') or '无'}；状态记录={len(statuses)} 个。",
         "至少记录 job_id 和 submitted/collecting/model/validation 等任务状态；正式版需要真实后台 worker。",
         "接入 Supabase job table + worker/RQ/Celery + 企业微信通知；当前仅为可审计同步原型。",
+        severity="architecture",
     )
 
 
@@ -309,6 +448,7 @@ def _check_permissions_logging(draft: ResearchDraft) -> ValidationCheck:
         f"visibility={permissions.get('visibility', '无')}；user_id_required={bool(permissions.get('user_id_required'))}；access_logs={permissions.get('access_logs', '无')}。",
         "报告元数据为 authorized，且记录非匿名 user_id 与访问/生成事件日志。",
         "接入微信登录/管理员权限配置/前端埋点；当前为本地 JSONL 或 Supabase 日志原型。",
+        severity="architecture",
     )
 
 
@@ -324,12 +464,31 @@ def _check_disclaimer(draft: ResearchDraft) -> ValidationCheck:
     )
 
 
+def _is_objective_scan_stage(draft: ResearchDraft) -> bool:
+    return (draft.run_metadata or {}).get("workflow_stage") == "objective_scan_ready"
+
+
+def _is_ai_chain_research(draft: ResearchDraft) -> bool:
+    text = " ".join(
+        [
+            draft.target.ticker,
+            draft.target.name,
+            draft.target.segment,
+            draft.target.description,
+            *[group.group_id for group in draft.comparable_groups],
+            *[group.title for group in draft.comparable_groups],
+        ]
+    ).casefold()
+    return any(token in text for token in ["ai", "gpu", "model", "accelerator", "foundry", "semiconductor", "算力", "模型", "芯片", "晶圆", "半导体"])
+
+
 def _check(check_id: str, category: str, requirement: str, ok: bool, observed: str, required: str, remediation: str, severity: str = "must") -> ValidationCheck:
+    status = "pass" if ok else "fail" if severity == "must" else "warn"
     return ValidationCheck(
         check_id=check_id,
         category=category,
         requirement=requirement,
-        status="pass" if ok else "fail",
+        status=status,
         observed=observed,
         required=required,
         severity=severity,

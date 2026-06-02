@@ -10,13 +10,21 @@ from .utils import LinkResult, dedupe_links, request_text, run_limited, search_u
 
 CHINA_MARKETS = {"港股", "A股", "沪深"}
 CHINA_KEYWORDS = ["中国", "香港", "台股", "中芯", "腾讯", "阿里", "百度", "京东", "理想", "小鹏", "比亚迪"]
+CHINA_ENGLISH_MARKERS = ["china", "hong kong", "taiwan", "shanghai", "shenzhen", "smic", "tsmc"]
 
 
 def is_china_company(company: dict[str, Any]) -> bool:
     market = str(company.get("market", ""))
     country = str(company.get("country", ""))
-    name = f"{company.get('name', '')} {company.get('name_en', '')}"
-    return market in CHINA_MARKETS or "中国" in country or any(keyword in name for keyword in CHINA_KEYWORDS)
+    name = f"{company.get('name', '')} {company.get('name_en', '')} {company.get('ticker', '')} {company.get('description', '')}"
+    text = f"{market} {country} {name}"
+    lowered = text.casefold()
+    return (
+        market in CHINA_MARKETS
+        or "中国" in country
+        or any(keyword in text for keyword in CHINA_KEYWORDS)
+        or any(marker in lowered for marker in CHINA_ENGLISH_MARKERS)
+    )
 
 
 def _extract_ddg_url(href: str) -> str:

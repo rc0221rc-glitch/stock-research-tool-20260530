@@ -3,7 +3,9 @@ from __future__ import annotations
 import html
 import json
 from pathlib import Path
+from typing import Any
 
+from .research_anomalies import POSITIVE, RISK
 from .research_models import EvidenceItem, FinancialChart, FinancialDataPoint, ResearchDraft, ResearchSignal
 from .research_validation import validate_research_draft
 from .utils import clean_filename
@@ -57,10 +59,11 @@ def render_memo_html(draft: ResearchDraft) -> str:
       {_validation_section(draft)}
       {_model_runs_section(draft)}
       {_financial_charts_section(draft, compact=True)}
+      {_objective_anomalies_section(draft, compact=True)}
       <section class="section">
         <div class="section-title">
-          <p class="eyebrow">Alpha Signals</p>
-          <h2>系统优先建议深挖的核心信号</h2>
+          <p class="eyebrow">深度分析信号</p>
+          <h2>基于已勾选异常生成的核心信号</h2>
         </div>
         <div class="signal-list">
           {''.join(_signal_card(signal, draft.evidence, compact=True) for signal in draft.signals)}
@@ -68,18 +71,18 @@ def render_memo_html(draft: ResearchDraft) -> str:
       </section>
       <section class="section two-col">
         <div>
-          <p class="eyebrow">Comparable Groups</p>
+          <p class="eyebrow">可比公司</p>
           <h2>精选可比与交叉验证组</h2>
           {_groups_html(draft)}
         </div>
         <div>
-          <p class="eyebrow">Evidence Audit</p>
+          <p class="eyebrow">证据审计</p>
           <h2>证据审计摘要</h2>
           {_audit_html(draft)}
         </div>
       </section>
       <section class="section">
-        <p class="eyebrow">Next Fetch Plan</p>
+        <p class="eyebrow">下一步验证</p>
         <h2>系统下一步自动验证计划</h2>
         <ol class="next-list">{''.join(f'<li>{_e(item)}</li>' for item in draft.next_fetch_plan)}</ol>
       </section>
@@ -98,12 +101,13 @@ def render_dashboard_html(draft: ResearchDraft) -> str:
       <section class="grid-3">
         {_metric_tile("候选证据", str(len(draft.evidence)), "所有图表与文字结论必须绑定来源")}
         {_metric_tile("核心信号草稿", str(len(draft.signals)), "含亮点、风险和待验证假设")}
-        {_metric_tile("真实财务图表", str(len(draft.financial_charts)), "基于 SEC XBRL 数据点")}
+        {_metric_tile("真实财务图表", str(len(draft.financial_charts)), "基于 SEC XBRL / Wind 数据点")}
       </section>
       {_financial_charts_section(draft, compact=False)}
+      {_objective_anomalies_section(draft, compact=False)}
       <section class="section">
         <div class="section-title">
-          <p class="eyebrow">Coverage Matrix</p>
+          <p class="eyebrow">覆盖矩阵</p>
           <h2>产业链证据覆盖矩阵</h2>
           <p>矩阵用于先看“哪里证据够、哪里需要补抓”，不是最终投资结论。</p>
         </div>
@@ -111,8 +115,8 @@ def render_dashboard_html(draft: ResearchDraft) -> str:
       </section>
       <section class="section">
         <div class="section-title">
-          <p class="eyebrow">Signal Cards</p>
-          <h2>Alpha 信号与评分</h2>
+          <p class="eyebrow">深度分析信号</p>
+          <h2>基于用户勾选异常的深度分析信号</h2>
         </div>
         <div class="signal-grid">
           {''.join(_signal_card(signal, draft.evidence, compact=False) for signal in draft.signals)}
@@ -120,18 +124,18 @@ def render_dashboard_html(draft: ResearchDraft) -> str:
       </section>
       <section class="section two-col">
         <div>
-          <p class="eyebrow">Comparable Groups</p>
+          <p class="eyebrow">可比公司</p>
           <h2>可比公司逻辑</h2>
           {_groups_html(draft)}
         </div>
         <div>
-          <p class="eyebrow">Audit Appendix</p>
+          <p class="eyebrow">审计附录</p>
           <h2>证据审计附录</h2>
           {_audit_html(draft)}
         </div>
       </section>
       <section class="section">
-        <p class="eyebrow">Evidence Table</p>
+        <p class="eyebrow">候选证据</p>
         <h2>候选证据清单</h2>
         {_evidence_table(draft.evidence)}
       </section>
@@ -142,7 +146,7 @@ def render_dashboard_html(draft: ResearchDraft) -> str:
 
 
 def _document(title: str, content: str, draft: ResearchDraft) -> str:
-    evidence_json = json.dumps([item.to_dict() for item in draft.evidence], ensure_ascii=False)
+    evidence_json = json.dumps([_evidence_payload(item) for item in draft.evidence], ensure_ascii=False)
     financial_json = json.dumps([chart.to_dict() for chart in draft.financial_charts], ensure_ascii=False)
     return f"""<!doctype html>
 <html lang="zh-CN">
@@ -169,7 +173,7 @@ def _document(title: str, content: str, draft: ResearchDraft) -> str:
           ${{item.quote ? `<blockquote>${{escapeHtml(item.quote)}}</blockquote>` : ''}}
           ${{item.page ? `<p>页码：${{escapeHtml(item.page)}}</p>` : ''}}
           ${{item.cell_reference ? `<p>表格单元格：${{escapeHtml(item.cell_reference)}}</p>` : ''}}
-          ${{item.screenshot_path ? `<p>截图：${{escapeHtml(item.screenshot_path)}}</p>` : '<p class="muted">截图将在证据下载与审计步骤生成后显示。</p>'}}
+          ${{item.screenshot_uri ? `<figure class="source-shot"><img src="${{item.screenshot_uri}}" alt="source screenshot"><figcaption>原始截图：${{escapeHtml(item.screenshot_path || '')}}</figcaption></figure>` : '<p class="muted">截图将在证据下载与审计步骤生成后显示。</p>'}}
           <a href="${{item.url}}" target="_blank" rel="noreferrer">打开原始链接 ↗</a>
         </article>
       `).join('') : '<p class="muted">这个信号暂未绑定证据，不能升级为正式结论。</p>';
@@ -191,12 +195,13 @@ def _document(title: str, content: str, draft: ResearchDraft) -> str:
           <div class="drawer-meta">${{escapeHtml(point.ticker)}} · ${{escapeHtml(point.metric_label)}} · ${{escapeHtml(point.period)}}</div>
           <h3>${{escapeHtml(point.display_value)}}</h3>
           <p>指标：${{escapeHtml(point.metric_label)}}；期间：${{escapeHtml(point.period)}}；截至日：${{escapeHtml(point.end_date)}}。</p>
-          <p class="muted">数据来自 SEC XBRL companyfacts。当前已能追溯到 filing accession；下一阶段会继续定位到具体表格、页码和截图。</p>
+          <p class="muted">${{escapeHtml(chart.source_note || '数据来自 SEC XBRL / Wind fundamentals。当前已能追溯到 filing accession 或 Wind 字段；下一阶段会继续定位到具体表格、页码和截图。')}}</p>
+          <p class="muted">财务数据截图：Wind/SEC 数据库来源通常不生成网页截图；正式版会补充 filing 页面截图或 Wind 字段审计截图。</p>
           ${{sources.map(source => `
             <div class="source-row">
-              <strong>${{escapeHtml(source.title || source.form || 'SEC filing')}}</strong>
+              <strong>${{escapeHtml(source.title || source.form || 'financial source')}}</strong>
               <p>${{escapeHtml(source.concept || '')}} · ${{escapeHtml(source.accession || '')}}</p>
-              ${{source.url ? `<a href="${{source.url}}" target="_blank" rel="noreferrer">打开 SEC 原始 filing ↗</a>` : ''}}
+              ${{source.url ? `<a href="${{source.url}}" target="_blank" rel="noreferrer">打开原始来源 ↗</a>` : ''}}
             </div>
           `).join('')}}
         </article>
@@ -212,6 +217,21 @@ def _document(title: str, content: str, draft: ResearchDraft) -> str:
   </script>
 </body>
 </html>"""
+
+
+def _evidence_payload(item: EvidenceItem) -> dict[str, Any]:
+    data = item.to_dict()
+    data["screenshot_uri"] = _local_path_to_uri(item.screenshot_path)
+    return data
+
+
+def _local_path_to_uri(value: str) -> str:
+    if not value:
+        return ""
+    try:
+        return Path(value).resolve().as_uri()
+    except Exception:
+        return value
 
 
 def _hero(draft: ResearchDraft, label: str, subtitle: str) -> str:
@@ -322,9 +342,9 @@ def _financial_charts_section(draft: ResearchDraft, compact: bool) -> str:
         return """
         <section class="section">
           <div class="empty-state">
-            <p class="eyebrow">Financial Charts</p>
+            <p class="eyebrow">财务图表</p>
             <h2>暂未生成真实财务图表</h2>
-            <p>当前公司或可比组缺少可直接抓取的 SEC XBRL 数据。下一阶段会继续补公司 IR 表格、港股/A股公告和非上市公司外部数据。</p>
+            <p>当前公司或可比组缺少可直接抓取的 SEC XBRL / Wind fundamentals 数据。下一阶段会继续补公司 IR 表格、港股/A股公告和非上市公司外部数据。</p>
           </div>
         </section>
         """
@@ -333,15 +353,65 @@ def _financial_charts_section(draft: ResearchDraft, compact: bool) -> str:
     <section class="section">
       <div class="section-title">
         <div>
-          <p class="eyebrow">Financial Charts</p>
+          <p class="eyebrow">财务图表</p>
           <h2>真实财务数据图表</h2>
-          <p>这些图表不是占位符：数据来自 SEC XBRL companyfacts，并保留原始 filing accession 来源。</p>
+          <p>这些图表不是占位符：数据来自 SEC XBRL companyfacts 或万得 Wind fundamentals，并保留原始 filing accession / Wind 字段来源。</p>
         </div>
       </div>
       <div class="chart-grid {'compact' if compact else ''}">
         {''.join(_chart_card(chart, index) for index, chart in enumerate(charts))}
       </div>
     </section>
+    """
+
+
+def _objective_anomalies_section(draft: ResearchDraft, compact: bool) -> str:
+    anomalies = draft.objective_anomalies[:8] if compact else draft.objective_anomalies
+    if not anomalies:
+        return """
+        <section class="section">
+          <div class="empty-state">
+            <p class="eyebrow">客观异常扫描</p>
+            <h2>暂未形成客观异常清单</h2>
+            <p>第一阶段需要先完成资料/数据收集、横纵向对比和异常扫描。</p>
+          </div>
+        </section>
+        """
+    positive = [item for item in anomalies if item.polarity == POSITIVE]
+    risk = [item for item in anomalies if item.polarity == RISK]
+    return f"""
+    <section class="section">
+      <div class="section-title">
+        <div>
+          <p class="eyebrow">客观异常扫描</p>
+          <h2>第一阶段客观异常清单</h2>
+          <p>这些条目来自数据、文字资料覆盖、横向/纵向对比；用户勾选后才进入大模型深度分析。</p>
+        </div>
+      </div>
+      <div class="anomaly-columns">
+        <div>
+          <h3>积极信号</h3>
+          {''.join(_anomaly_card(item) for item in positive) or '<p class="muted">暂无积极异常。</p>'}
+        </div>
+        <div>
+          <h3>风险信号</h3>
+          {''.join(_anomaly_card(item) for item in risk) or '<p class="muted">暂无风险异常。</p>'}
+        </div>
+      </div>
+    </section>
+    """
+
+
+def _anomaly_card(anomaly: Any) -> str:
+    selected = "已勾选深挖" if anomaly.selected_for_deep_dive else "未勾选"
+    return f"""
+    <article class="anomaly-card {'selected' if anomaly.selected_for_deep_dive else ''}">
+      <span>{_e(anomaly.category)} · {_e(selected)}</span>
+      <h4>{_e(anomaly.title)}</h4>
+      <p>{_e(anomaly.observation)}</p>
+      <p class="muted">对比依据：{_e(anomaly.comparison_basis)}</p>
+      {f'<strong>{_e(anomaly.magnitude)}</strong>' if anomaly.magnitude else ''}
+    </article>
     """
 
 
@@ -454,6 +524,7 @@ def _signal_card(signal: ResearchSignal, evidence: list[EvidenceItem], compact: 
         <span class="status">{_e(status_label)}</span>
       </div>
       <h3>{_e(signal.title)}</h3>
+      {_signal_anomaly_refs(signal)}
       <p>{_e(signal.conclusion)}</p>
       <div class="chart-hint">
         <strong>{_e(signal.chart_hint)}</strong>
@@ -466,6 +537,13 @@ def _signal_card(signal: ResearchSignal, evidence: list[EvidenceItem], compact: 
       <button type="button">查看绑定证据（{len(evidence_ids)}）</button>
     </article>
     """
+
+
+def _signal_anomaly_refs(signal: ResearchSignal) -> str:
+    if not signal.anomaly_ids:
+        return ""
+    labels = "".join(f"<span>{_e(item)}</span>" for item in signal.anomaly_ids[:4])
+    return f"<div class='pill-row anomaly-ref'><strong>对应异常：</strong>{labels}</div>"
 
 
 def _groups_html(draft: ResearchDraft) -> str:
@@ -598,7 +676,9 @@ def _style() -> str:
     .signal-list{display:grid;gap:16px}.signal-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px}.signal-card{padding:20px;cursor:pointer;transition:.18s transform,.18s box-shadow}.signal-card:hover{transform:translateY(-2px);box-shadow:0 22px 55px rgba(16,32,51,.13)}
     .signal-top{display:flex;justify-content:space-between;gap:12px;align-items:center}.badge,.status,.pill-row span{display:inline-flex;border-radius:999px;padding:5px 10px;font-size:12px;font-weight:700;background:#edf3ff;color:#2442a8}.status{background:#eefaf5;color:var(--green)}.needs_validation .status{background:#fff7ed;color:var(--orange)}.data_gap .status{background:#fff1f0;color:var(--red)}
     .signal-card h3{font-size:20px;margin:14px 0 8px}.signal-card p{color:#42526b}.chart-hint{border-left:4px solid var(--cyan);padding:10px 12px;background:#f0fbff;border-radius:12px;margin:14px 0}.chart-hint strong{display:block}.chart-hint span{color:var(--muted);font-size:13px}
+    .anomaly-ref{align-items:center;margin:8px 0}.anomaly-ref strong{font-size:12px;color:var(--muted)}.anomaly-ref span{max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
     .chart-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px}.chart-grid.compact{grid-template-columns:1fr}.chart-card{padding:18px;overflow:hidden}.chart-head{display:flex;justify-content:space-between;gap:16px;align-items:start}.chart-head h3{margin:0 0 6px;font-size:20px}.chart-head p,.source-note{color:var(--muted);font-size:13px;margin:0}.chart-head span{white-space:nowrap;background:#eef6ff;color:#2442a8;border-radius:999px;padding:6px 10px;font-size:12px;font-weight:800}.chart-insight{font-weight:800;color:#203047}.empty-state{padding:22px}.empty-chart{height:220px;display:grid;place-items:center;color:var(--muted)}
+    .anomaly-columns{display:grid;grid-template-columns:1fr 1fr;gap:18px}.anomaly-card{background:#fff;border:1px solid var(--line);border-radius:18px;padding:16px;margin:12px 0}.anomaly-card.selected{border-color:#2563eb;box-shadow:0 0 0 3px rgba(37,99,235,.10)}.anomaly-card span{font-size:12px;color:var(--muted);font-weight:800}.anomaly-card h4{margin:8px 0}.anomaly-card p{margin:8px 0}.anomaly-card strong{display:inline-block;background:#eef2ff;color:#1d4ed8;border-radius:999px;padding:5px 9px}
     .bar-chart{height:285px;display:flex;gap:10px;align-items:end;padding:20px 4px 8px;border-bottom:1px solid var(--line);overflow-x:auto}.bar-item{position:relative;min-width:72px;flex:1;height:230px;border:0;background:transparent;display:flex;flex-direction:column;align-items:center;justify-content:end;gap:6px;cursor:pointer;color:var(--ink)}.bar-item i{width:70%;border-radius:12px 12px 4px 4px;background:linear-gradient(180deg,var(--blue),var(--cyan));display:block;box-shadow:0 10px 22px rgba(39,94,254,.2);transition:.18s transform}.bar-item:hover i{transform:translateY(-4px)}.bar-value{font-size:12px;font-weight:800;color:#203047}.bar-item em{font-style:normal;font-size:11px;color:var(--muted);white-space:pre-line}.bar-item small{font-size:11px;color:var(--blue);font-weight:800}
     .line-chart{height:310px;position:relative;margin-top:8px}.line-chart svg{width:100%;height:260px;display:block}.axis{stroke:#d7e1ee;stroke-width:1}.trend{fill:none;stroke:var(--blue);stroke-width:4;stroke-linecap:round;stroke-linejoin:round}.line-dot{position:absolute;transform:translate(-50%,-50%);width:18px;height:18px;border-radius:999px;border:3px solid #fff;background:var(--blue);box-shadow:0 4px 12px rgba(39,94,254,.35);cursor:pointer}.line-dot span{position:absolute;left:50%;bottom:18px;transform:translateX(-50%);white-space:nowrap;background:#102033;color:#fff;border-radius:9px;padding:4px 7px;font-size:11px;opacity:0;pointer-events:none}.line-dot:hover span{opacity:1}.x-labels{position:absolute;left:0;right:0;bottom:8px;height:36px}.x-labels span{position:absolute;transform:translateX(-50%);font-size:11px;color:var(--muted);white-space:pre-line;text-align:center}
     .scores{display:grid;gap:8px;margin:14px 0}.score-row{display:grid;grid-template-columns:86px 1fr 24px;gap:8px;align-items:center;font-size:12px;color:var(--muted)}.score-row b{height:8px;border-radius:999px;background:linear-gradient(90deg,var(--blue),var(--cyan));display:block}.score-row em{font-style:normal;text-align:right;color:var(--ink)}
@@ -606,6 +686,6 @@ def _style() -> str:
     .group-list,.audit-list{display:grid;gap:12px}.group-card,.audit{padding:16px}.group-card h3,.audit strong{margin:0 0 8px;display:block}.group-card p,.group-card small,.audit p{color:var(--muted)}.pill-row{display:flex;gap:7px;flex-wrap:wrap;margin-top:12px}
     .audit{position:relative}.audit span{position:absolute;right:16px;top:16px;font-size:12px;color:var(--muted)}.table-wrap{overflow:auto;background:#fff;border:1px solid var(--line);border-radius:20px;box-shadow:var(--shadow)}table{border-collapse:collapse;width:100%;min-width:760px}th,td{padding:12px;border-bottom:1px solid var(--line);text-align:left;font-size:14px}th{background:#f2f6fb;color:#42526b}tr{transition:.15s background}tbody tr:hover{background:#f8fbff}
     .heat{min-width:42px;border:0;border-radius:10px;padding:8px 10px;cursor:pointer;background:#f1f5f9;color:#334155}.h1{background:#e0f2fe}.h2{background:#bae6fd}.h3{background:#7dd3fc}.h4{background:#38bdf8;color:#072638}
-    .drawer{position:fixed;right:0;top:0;width:min(520px,94vw);height:100vh;background:#fff;box-shadow:-20px 0 60px rgba(16,32,51,.18);transform:translateX(105%);transition:.22s transform;z-index:10;padding:20px;overflow:auto}.drawer.open{transform:translateX(0)}.drawer-head{display:flex;justify-content:space-between;gap:14px;align-items:center;border-bottom:1px solid var(--line);padding-bottom:14px;margin-bottom:14px}.drawer-head h2{margin:0}.drawer-card{border:1px solid var(--line);border-radius:18px;padding:14px;margin-bottom:12px;background:#fbfdff}.drawer-card h3{font-size:17px;margin:6px 0}.drawer-meta,.muted{color:var(--muted);font-size:13px}.drawer-card a{color:var(--blue);font-weight:800;text-decoration:none}.source-row{border-top:1px solid var(--line);padding-top:10px;margin-top:10px}.source-row p{margin:4px 0;color:var(--muted);font-size:13px}blockquote{margin:10px 0;padding:10px 12px;background:#f6f8fb;border-left:4px solid var(--blue);border-radius:10px}
-    details{background:#f8fafc;border-radius:14px;padding:10px 12px;margin:12px 0}summary{cursor:pointer;font-weight:800}@media(max-width:820px){.hero,.two-col,.grid-3,.signal-grid,.chart-grid{grid-template-columns:1fr}.section-title{display:block}.memo-shell,.dashboard-shell{padding:18px 12px 50px}.hero h1{font-size:34px}.drawer{width:100vw}.bar-item{min-width:64px}}
+    .drawer{position:fixed;right:0;top:0;width:min(520px,94vw);height:100vh;background:#fff;box-shadow:-20px 0 60px rgba(16,32,51,.18);transform:translateX(105%);transition:.22s transform;z-index:10;padding:20px;overflow:auto}.drawer.open{transform:translateX(0)}.drawer-head{display:flex;justify-content:space-between;gap:14px;align-items:center;border-bottom:1px solid var(--line);padding-bottom:14px;margin-bottom:14px}.drawer-head h2{margin:0}.drawer-card{border:1px solid var(--line);border-radius:18px;padding:14px;margin-bottom:12px;background:#fbfdff}.drawer-card h3{font-size:17px;margin:6px 0}.drawer-meta,.muted{color:var(--muted);font-size:13px}.drawer-card a{color:var(--blue);font-weight:800;text-decoration:none}.source-row{border-top:1px solid var(--line);padding-top:10px;margin-top:10px}.source-row p{margin:4px 0;color:var(--muted);font-size:13px}.source-shot{margin:12px 0;border:1px solid var(--line);border-radius:14px;overflow:hidden;background:#f8fafc}.source-shot img{display:block;width:100%;height:auto}.source-shot figcaption{padding:8px 10px;color:var(--muted);font-size:12px}blockquote{margin:10px 0;padding:10px 12px;background:#f6f8fb;border-left:4px solid var(--blue);border-radius:10px}
+    details{background:#f8fafc;border-radius:14px;padding:10px 12px;margin:12px 0}summary{cursor:pointer;font-weight:800}@media(max-width:820px){.hero,.two-col,.grid-3,.signal-grid,.chart-grid,.anomaly-columns{grid-template-columns:1fr}.section-title{display:block}.memo-shell,.dashboard-shell{padding:18px 12px 50px}.hero h1{font-size:34px}.drawer{width:100vw}.bar-item{min-width:64px}}
     """

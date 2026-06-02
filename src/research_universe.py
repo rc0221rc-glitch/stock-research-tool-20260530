@@ -94,6 +94,13 @@ TARGET_GROUP_BLUEPRINTS: dict[str, list[dict[str, object]]] = {
             "selection_logic": "选择先进节点和先进封装需求最大的 AI 芯片客户。",
             "tickers": ["NVDA", "AMD", "AVGO", "MRVL"],
         },
+        {
+            "group_id": "private_model_watch",
+            "title": "私有关键玩家观察：模型公司需求与融资信号",
+            "purpose": "用模型公司融资、ARR/收入传闻、API价格、用户增长、采购和合作交叉验证先进制程与封装需求。",
+            "selection_logic": "OpenAI / Anthropic / xAI 虽非晶圆代工直接可比公司，但它们是 AI 算力需求的重要源头和交叉验证对象。",
+            "tickers": ["OPENAI", "ANTHROPIC", "XAI"],
+        },
     ],
 }
 
@@ -205,5 +212,12 @@ def _fallback_blueprints(target: CompanyProfile) -> list[dict[str, object]]:
             "purpose": "观察服务器、网络、电力散热等硬件交付信号。",
             "selection_logic": "这些公司对 AI 集群建设的订单和瓶颈变化较敏感。",
             "tickers": ["SMCI", "DELL", "ANET", "VRT"],
+        },
+        {
+            "group_id": "private_model_watch",
+            "title": "私有关键玩家观察：模型公司需求与融资信号",
+            "purpose": "通过模型公司融资、ARR/收入传闻、API价格、用户增长、采购和合作交叉验证 AI 产业链景气度。",
+            "selection_logic": "这些非上市模型公司不是财务可比公司，但会显著影响算力需求、CSP capex 和上游芯片/制造订单。",
+            "tickers": ["OPENAI", "ANTHROPIC", "XAI"],
         },
     ]

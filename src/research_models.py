@@ -102,11 +102,13 @@ class ResearchSignal:
     status: str
     score: SignalScore
     evidence_ids: list[int] = field(default_factory=list)
+    anomaly_ids: list[str] = field(default_factory=list)
     chart_hint: str = ""
     chart_reason: str = ""
     reasoning_summary: str = ""
     reasoning_chain: list[str] = field(default_factory=list)
     next_validation_actions: list[str] = field(default_factory=list)
+    source_count: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
@@ -121,6 +123,29 @@ class AuditFinding:
     finding: str
     severity: str = "info"
     related_evidence_ids: list[int] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class ObjectiveAnomaly:
+    anomaly_id: str
+    polarity: str
+    category: str
+    title: str
+    observation: str
+    comparison_basis: str
+    magnitude: str = ""
+    metric: str = ""
+    ticker: str = ""
+    period: str = ""
+    confidence_tier: str = "medium"
+    source_refs: list[str] = field(default_factory=list)
+    evidence_ids: list[int] = field(default_factory=list)
+    chart_ids: list[str] = field(default_factory=list)
+    suggested_deep_dive: str = ""
+    selected_for_deep_dive: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -238,6 +263,7 @@ class ResearchDraft:
     next_fetch_plan: list[str]
     generated_at: str
     financial_charts: list[FinancialChart] = field(default_factory=list)
+    objective_anomalies: list[ObjectiveAnomaly] = field(default_factory=list)
     model_runs: list[ModelRunRecord] = field(default_factory=list)
     validation_report: ValidationReport | None = None
     report_label: str = "原型草稿：未完成专业深度研究"
@@ -255,6 +281,7 @@ class ResearchDraft:
             "next_fetch_plan": self.next_fetch_plan,
             "generated_at": self.generated_at,
             "financial_charts": [chart.to_dict() for chart in self.financial_charts],
+            "objective_anomalies": [anomaly.to_dict() for anomaly in self.objective_anomalies],
             "model_runs": [run.to_dict() for run in self.model_runs],
             "validation_report": self.validation_report.to_dict() if self.validation_report else None,
             "report_label": self.report_label,
