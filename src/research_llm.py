@@ -10,7 +10,7 @@ from typing import Any
 
 import requests
 
-from .research_models import ComparableGroup, EvidenceItem, FinancialChart, ModelRunRecord, ObjectiveAnomaly, ResearchSignal, SignalScore
+from .research_models import CompanyProfile, ComparableGroup, EvidenceItem, FinancialChart, ModelRunRecord, ObjectiveAnomaly, ResearchSignal, SignalScore
 
 
 DEEPSEEK_BASE_URL = "https://api.deepseek.com"
@@ -114,6 +114,157 @@ def missing_deepseek_key_record() -> ModelRunRecord:
         duration_seconds=0.0,
         error="Missing DeepSeek API key from UI, Streamlit Secrets, process env, or local .env; LLM analysis was not executed.",
     )
+
+
+def generate_deepseek_comparable_groups(
+    *,
+    api_key: str,
+    target: CompanyProfile,
+    max_core_companies: int = 5,
+    timeout: int = 120,
+) -> tuple[list[dict[str, Any]], ModelRunRecord]:
+    started = datetime.now()
+    start = time.monotonic()
+    run = ModelRunRecord(
+        provider="deepseek",
+        model=DEEPSEEK_MODEL,
+        purpose="Select highly comparable global companies before evidence collection.",
+        status="attempted",
+        started_at=started.strftime("%Y-%m-%d %H:%M:%S"),
+        prompt_summary=f"target={target.ticker} {target.name}; market={target.market}; max_core={max_core_companies}",
+    )
+    try:
+        payload = _build_comparable_payload(target, max_core_companies)
+        response, compatibility_mode, retry_notes = _post_chat_completion(api_key, payload, timeout)
+        data = response.json()
+        content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+        parsed, parse_note = _parse_or_repair_json_object(api_key, content, timeout)
+        groups = _comparable_groups_from_payload(parsed)
+        if not isinstance(groups, list) or not groups:
+            raise ValueError("DeepSeek returned no comparable groups")
+        completed = datetime.now()
+        run.status = "success"
+        run.completed_at = completed.strftime("%Y-%m-%d %H:%M:%S")
+        run.duration_seconds = time.monotonic() - start
+        usage = data.get("usage", {})
+        rejected = parsed.get("rejected_near_misses", [])
+        run.output_summary = (
+            f"groups={len(groups)}; rejected_near_misses={len(rejected) if isinstance(rejected, list) else 0}; "
+            f"tokens={usage.get('total_tokens', 'unknown')}; compatibility={compatibility_mode}; "
+            f"retries={'; '.join([note for note in [*retry_notes, parse_note] if note]) or 'none'}"
+        )
+        return groups, run
+    except Exception as exc:
+        completed = datetime.now()
+        run.status = "failed"
+        run.completed_at = completed.strftime("%Y-%m-%d %H:%M:%S")
+        run.duration_seconds = time.monotonic() - start
+        run.error = str(exc)
+        return [], run
+
+
+def _comparable_groups_from_payload(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    groups = payload.get("groups", [])
+    if isinstance(groups, list) and groups:
+        return [group for group in groups if isinstance(group, dict)]
+    core = payload.get("core_comparables") or payload.get("core_comparable_companies") or payload.get("核心可比公司")
+    validators = payload.get("cross_chain_validation") or payload.get("cross_chain_validators") or payload.get("交叉验证对象")
+    normalized: list[dict[str, Any]] = []
+    if isinstance(core, list) and core:
+        normalized.append(
+            {
+                "group_id": "core_comparable",
+                "title": "核心业务高度可比公司",
+                "purpose": "用于目标公司横向对比",
+                "selection_logic": str(payload.get("selection_logic") or "由 DeepSeek 根据核心业务可比性筛选"),
+                "companies": core,
+            }
+        )
+    if isinstance(validators, list) and validators:
+        normalized.append(
+            {
+                "group_id": "cross_chain_validation",
+                "title": "上下游/需求侧交叉验证对象（非核心可比）",
+                "purpose": "用于验证行业景气度或风险，不作为核心可比公司",
+                "selection_logic": str(payload.get("cross_chain_logic") or "由 DeepSeek 根据产业链关系筛选"),
+                "companies": validators,
+            }
+        )
+    return normalized
+
+
+def _build_comparable_payload(target: CompanyProfile, max_core_companies: int) -> dict[str, Any]:
+    system = (
+        "你是一名资深产业研究员，负责为全球上市公司选择高度可比公司。"
+        "第一版产品面向中文投资研究用户，必须中文优先。"
+        "你的任务不是选泛同行、指数成分或市值相近公司，而是严格判断核心收入/利润来源是否处于同一细分市场。"
+        "如果一家公司只是同属大行业、上下游、客户/供应商、替代技术路线或宏观温度计，不得放入核心可比组；"
+        "可放入交叉验证组，并明确标注“非核心可比”。"
+        "不要编造不存在的代码；不确定时给公司英文名和主要上市地，并把置信度降为 medium/low。"
+        "Return strict JSON only."
+    )
+    user = {
+        "task": "为目标公司选择全球范围内3-5家核心业务高度可比公司，并可选给出少量上下游/需求侧交叉验证对象。",
+        "target": target.to_company_dict(),
+        "hard_rules": [
+            "核心可比公司必须与目标公司的重点业务处在同一细分市场或直接争夺同一客户预算。",
+            "不要因为同属半导体、互联网、汽车、医药、能源等大行业就判定为可比。",
+            "例如：德州仪器与ADI可比，但与英特尔不可比；晶圆代工厂与IDM或设备厂通常不是核心可比。",
+            "默认核心可比公司数量为3-5家；宁缺毋滥，无法确认时少选并说明。",
+            "comparability_score 使用 1-5 分，5 代表最强可比，1 代表不适合作核心可比；核心可比组只放 4-5 分。",
+            "允许覆盖美国、中国A股/港股/中概股、欧洲、日本、韩国及其他全球上市公司。",
+            "交叉验证对象必须单独分组，不能伪装成核心可比公司。",
+            "每家公司必须给出选择理由、可比维度、置信度和是否核心可比。",
+        ],
+        "json_schema": {
+            "groups": [
+                {
+                    "group_id": "core_comparable",
+                    "title": "核心业务高度可比公司",
+                    "purpose": "用于目标公司横向对比",
+                    "selection_logic": "为什么这些公司与目标公司高度可比",
+                    "companies": [
+                        {
+                            "ticker": "股票代码或ADR/本地代码；未知可留空",
+                            "name": "公司英文名",
+                            "market": "主要上市地",
+                            "segment": "细分市场",
+                            "reason": "为什么高度可比",
+                            "comparability_score": "1-5 integer; 5 means strongest comparable",
+                            "confidence": "high|medium|low",
+                            "is_core_comparable": True,
+                        }
+                    ],
+                },
+                {
+                    "group_id": "cross_chain_validation",
+                    "title": "上下游/需求侧交叉验证对象（非核心可比）",
+                    "purpose": "用于验证行业景气度或风险，不作为核心可比公司",
+                    "selection_logic": "为什么这些对象适合作交叉验证",
+                    "companies": [],
+                },
+            ],
+            "rejected_near_misses": [
+                {
+                    "name": "看似相关但不应作为核心可比的公司",
+                    "reason": "排除原因",
+                }
+            ],
+        },
+        "max_core_companies": max(3, min(5, max_core_companies)),
+    }
+    return {
+        "model": DEEPSEEK_MODEL,
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": json.dumps(user, ensure_ascii=False)},
+        ],
+        "response_format": {"type": "json_object"},
+        "thinking": {"type": "enabled"},
+        "reasoning_effort": "high",
+        "temperature": 0.1,
+        "max_tokens": 5000,
+    }
 
 
 def _read_streamlit_secret(name: str) -> str:

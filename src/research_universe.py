@@ -3,8 +3,9 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import Any
 
-from .company_search_global import find_best_company
-from .research_models import CompanyProfile, ComparableGroup
+from .company_search_global import find_best_company, search_companies
+from .research_llm import generate_deepseek_comparable_groups, missing_deepseek_key_record, resolve_deepseek_api_key
+from .research_models import CompanyProfile, ComparableGroup, ModelRunRecord
 
 
 AI_COMPANY_UNIVERSE: dict[str, CompanyProfile] = {
@@ -163,6 +164,26 @@ def recommend_comparable_groups(target_query: str, max_core_companies: int = 5) 
     return groups
 
 
+def recommend_comparable_groups_with_llm(
+    target_query: str,
+    deepseek_api_key: str = "",
+    max_core_companies: int = 5,
+) -> tuple[list[ComparableGroup], ModelRunRecord]:
+    target = get_company_profile(target_query)
+    api_key = resolve_deepseek_api_key(deepseek_api_key)
+    if not api_key:
+        return [], missing_deepseek_key_record()
+    raw_groups, run = generate_deepseek_comparable_groups(
+        api_key=api_key,
+        target=target,
+        max_core_companies=max_core_companies,
+    )
+    groups = _groups_from_llm_payload(raw_groups, target)
+    if run.status != "success" or not groups:
+        return [], run
+    return groups, run
+
+
 def build_selected_groups(base_groups: list[ComparableGroup], selected_by_group: dict[str, list[str]], extra_companies: list[str] | None = None) -> list[ComparableGroup]:
     universe = all_research_companies()
     selected_groups: list[ComparableGroup] = []
@@ -183,6 +204,145 @@ def build_selected_groups(base_groups: list[ComparableGroup], selected_by_group:
             )
         )
     return selected_groups
+
+
+def _groups_from_llm_payload(raw_groups: list[dict[str, Any]], target: CompanyProfile) -> list[ComparableGroup]:
+    groups: list[ComparableGroup] = []
+    target_keys = _company_identity_keys(target)
+    for index, raw_group in enumerate(raw_groups[:4], start=1):
+        if not isinstance(raw_group, dict):
+            continue
+        raw_companies = raw_group.get("companies", [])
+        if not isinstance(raw_companies, list):
+            continue
+        group_id = str(raw_group.get("group_id") or f"llm_group_{index}").strip() or f"llm_group_{index}"
+        companies: list[CompanyProfile] = []
+        is_core_group = "core" in group_id.casefold() or "核心" in str(raw_group.get("title") or "")
+        for raw_company in raw_companies[:8]:
+            if is_core_group and not _passes_core_comparable_filter(raw_company):
+                continue
+            company = _profile_from_llm_company(raw_company)
+            if not company:
+                continue
+            keys = _company_identity_keys(company)
+            if keys & target_keys:
+                continue
+            if normalize_ticker(company.ticker) in {normalize_ticker(existing.ticker) for existing in companies}:
+                continue
+            companies.append(company)
+        if not companies:
+            continue
+        groups.append(
+            ComparableGroup(
+                group_id=_safe_group_id(group_id),
+                title=str(raw_group.get("title") or "AI 精选可比/验证公司"),
+                purpose=str(raw_group.get("purpose") or "用于横向对比和交叉验证"),
+                selection_logic=str(raw_group.get("selection_logic") or "由 DeepSeek 根据核心业务可比性筛选"),
+                companies=companies,
+            )
+        )
+    return groups
+
+
+def _company_identity_keys(company: CompanyProfile) -> set[str]:
+    return {
+        key
+        for key in [
+            normalize_ticker(company.ticker),
+            normalize_ticker(company.local_code),
+            company.name.casefold().strip(),
+        ]
+        if key
+    }
+
+
+def _passes_core_comparable_filter(raw_company: Any) -> bool:
+    if not isinstance(raw_company, dict):
+        return False
+    if raw_company.get("is_core_comparable") is False:
+        return False
+    confidence = str(raw_company.get("confidence") or "medium").casefold()
+    if confidence == "low":
+        return False
+    try:
+        score = float(raw_company.get("comparability_score", 0))
+    except Exception:
+        score = 0
+    return score >= 4 or score == 0
+
+
+def _profile_from_llm_company(raw_company: Any) -> CompanyProfile | None:
+    if not isinstance(raw_company, dict):
+        return None
+    name = str(raw_company.get("name") or "").strip()
+    ticker = str(raw_company.get("ticker") or "").strip().upper()
+    local_code = str(raw_company.get("local_code") or "").strip()
+    market = str(raw_company.get("market") or "Global").strip()
+    found = _best_global_match(ticker or local_code or name, raw_company)
+    if found:
+        profile = _company_profile_from_global_result(found, ticker or local_code or name)
+        return _merge_llm_company_metadata(profile, raw_company)
+    if not name and not ticker:
+        return None
+    return CompanyProfile(
+        ticker=ticker or local_code or name.upper(),
+        name=name or ticker or local_code,
+        market=market,
+        role="LLM selected comparable",
+        segment=str(raw_company.get("segment") or "LLM selected comparable").strip(),
+        description=str(raw_company.get("reason") or "").strip(),
+        source_hint="DeepSeek comparable selection",
+        local_code=local_code,
+    )
+
+
+def _best_global_match(query: str, raw_company: dict[str, Any]) -> dict[str, Any] | None:
+    query = (query or "").strip()
+    if not query:
+        return None
+    try:
+        results = search_companies(query, limit=6)
+    except Exception:
+        results = []
+    if not results:
+        return None
+    raw_name = str(raw_company.get("name") or "").casefold()
+    raw_ticker = normalize_ticker(str(raw_company.get("ticker") or ""))
+    raw_local_code = normalize_ticker(str(raw_company.get("local_code") or ""))
+    for result in results:
+        result_ticker = normalize_ticker(str(result.get("ticker") or ""))
+        result_local_code = normalize_ticker(str(result.get("local_code") or ""))
+        result_names = {
+            str(result.get("name") or "").casefold(),
+            str(result.get("name_en") or "").casefold(),
+            *(str(alias).casefold() for alias in (result.get("aliases") or [])),
+        }
+        result_codes = {code for code in [result_ticker, result_local_code] if code}
+        raw_codes = {code for code in [raw_ticker, raw_local_code] if code}
+        if raw_codes and raw_codes & result_codes:
+            return result
+        if raw_name and raw_name in result_names:
+            return result
+    return None
+
+
+def _merge_llm_company_metadata(profile: CompanyProfile, raw_company: dict[str, Any]) -> CompanyProfile:
+    reason = str(raw_company.get("reason") or "").strip()
+    segment = str(raw_company.get("segment") or profile.segment).strip()
+    confidence = str(raw_company.get("confidence") or "").strip()
+    description_parts = [part for part in [profile.description, reason, f"LLM confidence: {confidence}" if confidence else ""] if part]
+    return replace(
+        profile,
+        role="LLM selected comparable" if raw_company.get("is_core_comparable", True) else "LLM selected cross-chain validator",
+        segment=segment or profile.segment,
+        description="; ".join(description_parts),
+        source_hint=(profile.source_hint + " + DeepSeek comparable selection").strip(" +"),
+    )
+
+
+def _safe_group_id(value: str) -> str:
+    cleaned = "".join(ch if ch.isalnum() or ch in {"_", "-"} else "_" for ch in value.strip().lower())
+    return cleaned.strip("_") or "llm_comparable_group"
 
 
 def _discover_global_company(query: str) -> CompanyProfile | None:

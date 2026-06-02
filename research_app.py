@@ -22,7 +22,7 @@ from src.research_storage import (
     suggested_supabase_schema,
 )
 from src.research_validation import checklist_markdown
-from src.research_universe import build_selected_groups, get_company_profile, recommend_comparable_groups
+from src.research_universe import build_selected_groups, get_company_profile, recommend_comparable_groups_with_llm
 
 
 st.set_page_config(page_title="AI 行业研究工具", page_icon="🧠", layout="wide")
@@ -31,8 +31,9 @@ st.set_page_config(page_title="AI 行业研究工具", page_icon="🧠", layout=
 def init_state() -> None:
     st.session_state.setdefault("target_query", "NVDA")
     st.session_state.setdefault("quarter_count", 4)
-    st.session_state.setdefault("base_groups", recommend_comparable_groups("NVDA"))
+    st.session_state.setdefault("base_groups", [])
     st.session_state.setdefault("selected_groups", st.session_state.base_groups)
+    st.session_state.setdefault("comparable_model_run", None)
     st.session_state.setdefault("research_job", None)
     st.session_state.setdefault("research_draft", None)
     st.session_state.setdefault("selected_anomaly_ids", [])
@@ -72,7 +73,7 @@ def render_sidebar() -> tuple[str, str, str]:
     return user_id.strip() or "anonymous", claude_api_key.strip(), deepseek_api_key.strip()
 
 
-def render_target_form() -> None:
+def render_target_form(deepseek_api_key: str) -> None:
     st.subheader("1. 输入目标公司")
     with st.form("target_form", clear_on_submit=False):
         col_target, col_window = st.columns([2, 1])
@@ -90,12 +91,19 @@ def render_target_form() -> None:
         target_query = target_query.strip() or "NVDA"
         st.session_state.target_query = target_query
         st.session_state.quarter_count = quarter_count
-        st.session_state.base_groups = recommend_comparable_groups(target_query)
+        with st.spinner("正在调用 DeepSeek 精选高度可比公司；这一步会严格区分核心可比与交叉验证对象..."):
+            groups, model_run = recommend_comparable_groups_with_llm(target_query, deepseek_api_key=deepseek_api_key)
+        st.session_state.base_groups = groups
+        st.session_state.comparable_model_run = model_run
         st.session_state.selected_groups = st.session_state.base_groups
         st.session_state.research_draft = None
         st.session_state.memo_path = ""
         st.session_state.dashboard_path = ""
-        st.success("已刷新可比公司建议。")
+        model_message = model_run.error or model_run.output_summary or model_run.status
+        if model_run.status == "success":
+            st.success("DeepSeek 已完成高度可比公司精选。")
+        else:
+            st.error(f"DeepSeek 可比公司精选未成功。请检查模型运行记录后重试。原因：{model_message}")
 
 
 def render_comparable_editor() -> list[Any]:
@@ -103,6 +111,13 @@ def render_comparable_editor() -> list[Any]:
     st.subheader("2. 调整 AI 精选可比组")
     st.caption("这里不是泛行业列表，而是按核心业务、上游供给、下游需求、替代路线和私有关键玩家拆组。你可以删减或新增。")
     selected_by_group: dict[str, list[str]] = {}
+    model_run = st.session_state.get("comparable_model_run")
+    if model_run:
+        with st.expander("DeepSeek 可比公司选择运行记录", expanded=getattr(model_run, "status", "") != "success"):
+            st.json(model_run.to_dict() if hasattr(model_run, "to_dict") else model_run)
+    if not st.session_state.base_groups:
+        st.warning("尚未生成可比公司建议。请在第一步输入目标公司并回车/点击按钮，系统会先调用 DeepSeek 精选高度可比公司。")
+        return []
     for group in st.session_state.base_groups:
         with st.expander(group.title, expanded=True):
             st.markdown(f"**用途：** {group.purpose}")
@@ -139,6 +154,9 @@ def render_comparable_editor() -> list[Any]:
 def render_task_runner(user_id: str, claude_api_key: str, deepseek_api_key: str, selected_groups: list[Any]) -> None:
     st.subheader("3. 第一阶段：客观扫描 → 异常清单")
     st.caption("第一阶段只做客观工作：找信息、横纵向对比、列出异常。不调用大模型做主观深度判断，先让你选择哪些值得挖。")
+    if not selected_groups:
+        st.info("请先在第一步生成 DeepSeek 高度可比公司建议，并在第二步确认可比公司后再开始客观扫描。")
+        return
     include_external_search = st.checkbox("启用外部公开信息搜索（媒体、平台、私有玩家线索）", value=True)
     capture_screenshots = st.checkbox("为关键证据生成网页/PDF 截图", value=True)
     max_companies = st.slider("本轮最多抓取研究对象数", min_value=4, max_value=20, value=12, help="原型阶段建议先控制数量，避免单次运行过慢。")
@@ -173,6 +191,9 @@ def render_task_runner(user_id: str, claude_api_key: str, deepseek_api_key: str,
                     user_id=user_id,
                     job_id=job["id"],
                 )
+            comparable_model_run = st.session_state.get("comparable_model_run")
+            if comparable_model_run and not any(run.purpose == getattr(comparable_model_run, "purpose", "") for run in draft.model_runs):
+                draft.model_runs.insert(0, comparable_model_run)
             progress.progress(88, text="生成客观异常清单、证据审计与自动验收清单")
             st.session_state.research_draft = draft
             log_research_event(user_id, "objective_scan_ready", metadata={"job_id": job["id"], "evidence_count": len(draft.evidence), "anomaly_count": len(draft.objective_anomalies)})
@@ -393,7 +414,7 @@ def main() -> None:
     user_id, claude_api_key, deepseek_api_key = render_sidebar()
     st.title("🧠 AI 行业研究工具 · 独立原型入口")
     st.caption("目标：从大量公司文件、业绩会纪要、外部可信信息中筛出真正值得投资人关注的信号，并生成可追溯 HTML。")
-    render_target_form()
+    render_target_form(deepseek_api_key)
     st.divider()
     selected_groups = render_comparable_editor()
     st.divider()
