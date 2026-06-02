@@ -636,6 +636,9 @@ def _sec_company_tickers() -> list[dict[str, Any]]:
 
 def _score_company(query: str, company: dict[str, Any]) -> float:
     normalized_query = normalize_text(query)
+    a_share_query_code = ""
+    if len(normalized_query) in {8, 9} and normalized_query[:6].isdigit() and normalized_query[6:] in {"sz", "ss", "sh"}:
+        a_share_query_code = normalized_query[:6]
     fields = [
         company.get("name", ""),
         company.get("name_en", ""),
@@ -645,6 +648,12 @@ def _score_company(query: str, company: dict[str, Any]) -> float:
     ]
     normalized_fields = [normalize_text(field) for field in fields if field]
     if not normalized_query:
+        return 0
+    if a_share_query_code:
+        for index, field in enumerate(normalized_fields):
+            digits = "".join(ch for ch in field if ch.isdigit())
+            if digits and (digits.lstrip("0") or "0") == (a_share_query_code.lstrip("0") or "0"):
+                return 1.0 - index * 0.01
         return 0
     if normalized_query.isdigit():
         query_number = normalized_query.lstrip("0") or "0"
@@ -755,7 +764,20 @@ def _cninfo_company_search(query: str) -> list[dict[str, Any]]:
     try:
         from .cninfo_fetcher import search_cninfo_companies
 
-        return search_cninfo_companies(query, limit=8)
+        normalized_query = normalize_text(query)
+        candidates = [query]
+        if len(normalized_query) == 8 and normalized_query[:6].isdigit() and normalized_query[6:] in {"sz", "ss", "sh"}:
+            candidates.append(normalized_query[:6])
+        merged: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for candidate in candidates:
+            for company in search_cninfo_companies(candidate, limit=8):
+                key = normalize_text(company.get("local_code", "")) or normalize_text(company.get("name", ""))
+                if key in seen:
+                    continue
+                seen.add(key)
+                merged.append(company)
+        return merged
     except Exception:
         return []
 

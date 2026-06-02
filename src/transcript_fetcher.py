@@ -432,7 +432,7 @@ def _known_transcript_entry_links(ticker: str, company_name: str) -> list[LinkRe
     ]
     for source, query in source_queries:
         entries.append(LinkResult(f"Bing 定向搜索：{source} {base.upper()} Transcript", _bing_search_url(query), "Transcript 搜索建议", kind="transcript", is_direct_file=False))
-        entries.append(LinkResult(f"Google 定向搜索：{source} {base.upper()} Transcript", search_url(query), "Transcript 搜索建议", kind="transcript", is_direct_file=False))
+        entries.append(LinkResult(f"Bing 中文入口：{source} {base.upper()} Transcript", search_url(query), "Transcript 搜索建议", kind="transcript", is_direct_file=False))
     return entries
 
 

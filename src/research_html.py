@@ -579,7 +579,7 @@ def _audit_html(draft: ResearchDraft) -> str:
 
 
 def _coverage_matrix(draft: ResearchDraft) -> str:
-    types = ["annual", "quarterly", "transcript", "presentation", "external_signal", "web"]
+    types = ["annual", "quarterly", "transcript", "expert_memo", "presentation", "external_signal", "web"]
     rows = []
     company_names = [draft.target, *[company for group in draft.comparable_groups for company in group.companies]]
     seen: set[str] = set()
@@ -647,8 +647,13 @@ def _type_label(value: str) -> str:
         "annual": "年报",
         "quarterly": "季报",
         "transcript": "业绩会纪要",
+        "expert_memo": "专家/渠道纪要",
         "presentation": "演示材料",
         "external_signal": "外部信号",
+        "official_ir": "官方 IR",
+        "official_filings": "官方公告",
+        "financial_datapoint": "财务数据点",
+        "private_company": "私有公司线索",
         "web": "网页",
     }.get(value, value or "未知")
 

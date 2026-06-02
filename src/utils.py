@@ -222,7 +222,7 @@ def html_link_manifest(items: Iterable[dict[str, Any]], title: str = "Links") ->
 
 
 def search_url(query: str) -> str:
-    return f"https://www.google.com/search?q={quote_plus(query)}"
+    return f"https://cn.bing.com/search?q={quote_plus(query)}&setlang=zh-CN&cc=CN"
 
 
 def fallback_links(company: dict[str, Any], kinds: Iterable[str] | None = None) -> list[dict[str, Any]]:
@@ -251,5 +251,5 @@ def fallback_links(company: dict[str, Any], kinds: Iterable[str] | None = None) 
     if "韩股" in market:
         links.append(LinkResult("韩国 DART", "https://dart.fss.or.kr/", "兜底链接", kind="DART", is_direct_file=False))
     if not selected or selected.intersection({"annual", "quarterly", "prospectus", "presentation", "transcript"}):
-        links.append(LinkResult("Google PDF 搜索", search_url(f"{name} {ticker} {suffix}"), "兜底链接", kind="搜索", is_direct_file=False))
+        links.append(LinkResult("Bing PDF 搜索", search_url(f"{name} {ticker} {suffix}"), "兜底链接", kind="搜索", is_direct_file=False))
     return [item.__dict__ for item in links]

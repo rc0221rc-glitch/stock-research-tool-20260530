@@ -189,12 +189,14 @@ def _search_entry_evidence(companies: list[CompanyProfile], years: list[str], qu
     for company in companies:
         for evidence_type, suffixes in {
             "transcript": ["earnings call transcript", "业绩会纪要", "电话会纪要"],
+            "expert_memo": ["专家交流纪要", "产业链专家交流", "渠道调研纪要", "草根调研纪要"],
             "presentation": ["results presentation pdf", "investor presentation pdf", "业绩演示材料 PDF"],
             "annual": ["annual report pdf", "年度报告 PDF"],
             "quarterly": ["quarterly results pdf", "季度业绩 PDF"],
             "external_signal": ["news partnership capex demand supply", "供应商 披露 合作 景气度"],
         }.items():
-            for suffix in suffixes[:2]:
+            limit = 4 if evidence_type in {"transcript", "expert_memo"} else 2
+            for suffix in suffixes[:limit]:
                 query = f"{company.name} {company.ticker} {periods} {suffix}".strip()
                 items.append(
                     EvidenceItem(
@@ -206,7 +208,7 @@ def _search_entry_evidence(companies: list[CompanyProfile], years: list[str], qu
                         evidence_type=evidence_type,
                         period=periods,
                         confidence_tier="search",
-                        confidence_reason="自动生成的定向搜索入口；用于补抓具体 PDF、业绩会纪要、外部事件与交叉验证资料。",
+                        confidence_reason="自动生成的定向搜索入口；用于补抓具体 PDF、业绩会纪要、专家/渠道纪要、外部事件与交叉验证资料。",
                         trace_type="search_entry",
                         access_scope="public",
                     )

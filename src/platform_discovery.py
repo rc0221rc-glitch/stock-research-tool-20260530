@@ -50,7 +50,14 @@ PRESENTATION_SOURCES = [
 CHINA_PLATFORM_SOURCES = [
     ("微信公众号", "site:mp.weixin.qq.com {query} 业绩会纪要"),
     ("微信公众号", "site:mp.weixin.qq.com {query} 电话会纪要"),
+    ("微信公众号专家纪要", "site:mp.weixin.qq.com {query} 专家交流纪要"),
+    ("微信公众号专家纪要", "site:mp.weixin.qq.com {query} 专家电话会纪要"),
+    ("微信公众号专家纪要", "site:mp.weixin.qq.com {query} 行业专家交流"),
+    ("微信公众号专家纪要", "site:mp.weixin.qq.com {query} 产业链专家交流"),
+    ("微信公众号专家纪要", "site:mp.weixin.qq.com {query} 渠道调研纪要"),
+    ("微信公众号专家纪要", "site:mp.weixin.qq.com {query} 草根调研纪要"),
     ("雪球", "site:xueqiu.com {query} 业绩会纪要"),
+    ("雪球专家纪要", "site:xueqiu.com {query} 专家交流纪要"),
     ("东方财富", "site:eastmoney.com {query} 投资者关系活动记录"),
     ("同花顺公告", "site:notice.10jqka.com.cn {query} 投资者关系活动记录"),
     ("巨潮 PDF", "site:static.cninfo.com.cn {query} PDF"),
@@ -95,7 +102,7 @@ def _search(query: str, source: str, kind: str, limit: int = 4) -> list[LinkResu
             continue
         if kind == "presentation" and not any(token in f"{title} {url}".casefold() for token in ["presentation", "slides", "deck", "results", "webcast", ".pdf"]):
             continue
-        if kind == "transcript" and not any(token in f"{title} {url}".casefold() for token in ["transcript", "earnings call", "conference call", "业绩会", "电话会", "纪要", "investor relations"]):
+        if kind == "transcript" and not any(token in f"{title} {url}".casefold() for token in ["transcript", "earnings call", "conference call", "业绩会", "电话会", "纪要", "专家", "调研", "渠道", "investor relations"]):
             continue
         results.append(LinkResult(title=title, url=url, source=source, kind=kind, is_direct_file=".pdf" in lower_url))
     return results
@@ -108,12 +115,14 @@ def _platform_entry_links(query: str, kind: str) -> list[LinkResult]:
             ("TIKR 搜索入口", f"https://app.tikr.com/search?query={quote_plus(query)}"),
             ("Koyfin 搜索入口", f"https://app.koyfin.com/search?q={quote_plus(query)}"),
             ("BamSEC 搜索入口", f"https://www.bamsec.com/search?q={quote_plus(query)}"),
+            ("微信公众号专家纪要搜索", search_url(f"site:mp.weixin.qq.com {query} 专家交流纪要")),
+            ("微信公众号产业链调研搜索", search_url(f"site:mp.weixin.qq.com {query} 产业链专家交流 OR 渠道调研纪要")),
         ]
     else:
         entries = [
             ("Quartr 演示材料入口", f"https://quartr.com/search?query={quote_plus(query + ' presentation')}"),
             ("SlideShare 搜索入口", f"https://www.slideshare.net/search/slideshow?searchfrom=header&q={quote_plus(query + ' investor presentation')}"),
-            ("DocSend 搜索入口", f"https://www.google.com/search?q={quote_plus('site:docsend.com ' + query + ' investor presentation')}"),
+            ("DocSend 搜索入口", search_url(f"site:docsend.com {query} investor presentation")),
         ]
     return [LinkResult(title, url, "平台入口", kind=kind, is_direct_file=False, note="该平台可能需要登录或存在访问限制。") for title, url in entries]
 

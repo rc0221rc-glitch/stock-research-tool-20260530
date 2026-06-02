@@ -13,7 +13,7 @@ from .utils import DEFAULT_HEADERS, LinkResult, dedupe_links, request_text, run_
 FILE_TERMS = {
     "annual": ["annual report filetype:pdf", "年度报告 PDF", "年报 PDF", "form 20-F pdf", "10-K pdf"],
     "quarterly": ["quarterly results pdf", "quarterly report pdf", "interim report pdf", "季报 PDF", "中报 PDF", "季度报告 PDF"],
-    "transcript": ["earnings call transcript", "conference call transcript", "业绩会纪要", "电话会纪要", "业绩说明会纪要", "交流纪要"],
+    "transcript": ["earnings call transcript", "conference call transcript", "业绩会纪要", "电话会纪要", "业绩说明会纪要", "交流纪要", "专家交流纪要", "专家电话会纪要", "产业链专家交流", "渠道调研纪要"],
     "presentation": ["earnings presentation filetype:pdf", "investor presentation filetype:pdf", "results presentation filetype:pdf", "业绩演示材料 PDF", "业绩发布材料 PDF", "投资者演示 PDF"],
     "prospectus": ["prospectus pdf", "招股说明书 PDF"],
     "proxy": ["proxy statement", "DEF 14A pdf"],
@@ -22,7 +22,7 @@ FILE_TERMS = {
 DOCUMENT_TOKENS = {
     "annual": ["annual", "report", "20-f", "10-k", "年度报告", "年报", ".pdf"],
     "quarterly": ["quarter", "interim", "results", "report", "季报", "中报", "季度", "业绩", ".pdf"],
-    "transcript": ["transcript", "conference call", "earnings call", "prepared remarks", "电话会", "业绩会", "纪要", "交流"],
+    "transcript": ["transcript", "conference call", "earnings call", "prepared remarks", "电话会", "业绩会", "纪要", "交流", "专家", "调研", "渠道"],
     "presentation": ["presentation", "slides", "deck", "results", "investor", "业绩", "演示", "材料", ".pdf"],
     "prospectus": ["prospectus", "招股说明书", ".pdf"],
     "proxy": ["proxy", "def 14a", ".pdf"],
@@ -224,7 +224,7 @@ def _query_jobs(
         if china_company and kind == "transcript":
             for date_text, year, quarter in date_terms[:6]:
                 for company_term in cjk_company_terms[:2]:
-                    for suffix in ["业绩会纪要", "电话会纪要", "业绩说明会纪要", "交流纪要"]:
+                    for suffix in ["业绩会纪要", "电话会纪要", "业绩说明会纪要", "交流纪要", "专家交流纪要", "专家电话会纪要", "行业专家交流", "产业链专家交流", "渠道调研纪要", "草根调研纪要"]:
                         add(candidates, " ".join(part for part in [company_term, date_text, suffix] if part), kind, year, quarter)
                         add(candidates, " ".join(part for part in ["site:mp.weixin.qq.com", company_term, date_text, suffix] if part), kind, year, quarter)
 
@@ -391,7 +391,7 @@ def _result_score(result: LinkResult, company: dict[str, Any]) -> int:
         score += 18
     if str(result.date or "") and str(result.date) in f"{title} {url}":
         score += 8
-    if result.kind == "transcript" and any(token in f"{title} {url}" for token in ["transcript", "纪要", "电话会"]):
+    if result.kind == "transcript" and any(token in f"{title} {url}" for token in ["transcript", "纪要", "电话会", "专家", "调研"]):
         score += 8
     if result.kind == "presentation" and any(token in f"{title} {url}" for token in ["presentation", "slides", "演示", "材料", ".pdf"]):
         score += 8

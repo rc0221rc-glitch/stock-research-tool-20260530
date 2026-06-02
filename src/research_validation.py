@@ -34,6 +34,7 @@ def validate_research_draft(draft: ResearchDraft) -> ValidationReport:
         _check_evidence_audit(draft),
         _check_three_source_validation(draft),
         _check_transcript_and_presentation(draft),
+        _check_chinese_expert_memos(draft),
         _check_external_sources(draft),
         _check_private_company_evidence(draft),
         _check_interactive_html_support(draft),
@@ -355,6 +356,38 @@ def _check_transcript_and_presentation(draft: ResearchDraft) -> ValidationCheck:
     )
 
 
+def _check_chinese_expert_memos(draft: ResearchDraft) -> ValidationCheck:
+    counts = Counter(item.evidence_type for item in draft.evidence)
+    china_related = _is_china_related_research(draft)
+    expert_items = [
+        item
+        for item in draft.evidence
+        if item.evidence_type == "expert_memo"
+        or any(token in f"{item.title} {item.source} {item.url}" for token in ["专家交流", "专家电话", "行业专家", "产业链专家", "渠道调研", "草根调研", "微信公众号"])
+    ]
+    if not china_related:
+        return _check(
+            "chinese_expert_memos",
+            "中文专家纪要",
+            "非中国相关标的可不强制微信公众号/专家纪要，但若出现也必须作为待验证线索处理。",
+            True,
+            f"当前非中国相关研究；专家/渠道纪要候选 {len(expert_items)} 条。",
+            "中国相关标的应补充微信公众号、雪球、中文投研平台的专家/渠道纪要线索。",
+            "",
+            severity="stage",
+        )
+    return _check(
+        "chinese_expert_memos",
+        "中文专家纪要",
+        "中国相关公司必须增强微信公众号、专家交流纪要、产业链调研和渠道调研线索，但只能作为需交叉验证的平台证据。",
+        len(expert_items) >= 2,
+        f"Expert memo 类型 {counts.get('expert_memo', 0)} 条；关键词命中候选 {len(expert_items)} 条。",
+        "至少 2 条专家/渠道纪要候选或搜索入口。",
+        "补抓 site:mp.weixin.qq.com / weixin.sogou / 雪球 / 华尔街见闻等中文纪要入口，并在报告审计中标注需三方交叉验证。",
+        severity="must" if china_related else "stage",
+    )
+
+
 def _check_external_sources(draft: ResearchDraft) -> ValidationCheck:
     external = [item for item in draft.evidence if item.confidence_tier in {"media", "platform", "search", "medium"}]
     return _check(
@@ -480,6 +513,23 @@ def _is_ai_chain_research(draft: ResearchDraft) -> bool:
         ]
     ).casefold()
     return any(token in text for token in ["ai", "gpu", "model", "accelerator", "foundry", "semiconductor", "算力", "模型", "芯片", "晶圆", "半导体"])
+
+
+def _is_china_related_research(draft: ResearchDraft) -> bool:
+    text = " ".join(
+        [
+            draft.target.ticker,
+            draft.target.name,
+            draft.target.market,
+            draft.target.country,
+            draft.target.description,
+            *[company.ticker for group in draft.comparable_groups for company in group.companies],
+            *[company.name for group in draft.comparable_groups for company in group.companies],
+            *[company.market for group in draft.comparable_groups for company in group.companies],
+            *[company.country for group in draft.comparable_groups for company in group.companies],
+        ]
+    ).casefold()
+    return any(token in text for token in ["中国", "a股", "沪深", "港股", "香港", "台湾", "china", "hong kong", "taiwan", "smic", "tsmc"])
 
 
 def _check(check_id: str, category: str, requirement: str, ok: bool, observed: str, required: str, remediation: str, severity: str = "must") -> ValidationCheck:

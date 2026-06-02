@@ -271,6 +271,12 @@ def audit_evidence(evidence: list[EvidenceItem], target: CompanyProfile, groups:
 
     transcript_ids = [index for index, item in enumerate(evidence) if item.evidence_type == "transcript"]
     presentation_ids = [index for index, item in enumerate(evidence) if item.evidence_type == "presentation"]
+    expert_memo_ids = [
+        index
+        for index, item in enumerate(evidence)
+        if item.evidence_type == "expert_memo"
+        or any(token in f"{item.title} {item.source} {item.url}" for token in ["专家交流", "专家电话", "行业专家", "产业链专家", "渠道调研", "草根调研"])
+    ]
     findings.append(
         AuditFinding(
             topic="管理层表述与演示材料",
@@ -278,6 +284,15 @@ def audit_evidence(evidence: list[EvidenceItem], target: CompanyProfile, groups:
             finding=f"Transcript 候选 {len(transcript_ids)} 条，Presentation 候选 {len(presentation_ids)} 条；后续 AI 应重点比对措辞变化和经营分部口径。",
             severity="info" if transcript_ids or presentation_ids else "warning",
             related_evidence_ids=[*transcript_ids[:4], *presentation_ids[:4]],
+        )
+    )
+    findings.append(
+        AuditFinding(
+            topic="中文专家/渠道纪要线索",
+            status="pass" if expert_memo_ids or not _is_china_related(target) else "warning",
+            finding=f"专家交流、产业链专家或渠道调研类候选 {len(expert_memo_ids)} 条。这类微信公众号/雪球/中文平台内容可提供需求、库存、价格和客户变化线索，但不能直接作为强结论，必须与官方披露、财务数据和同行/上下游来源交叉验证。",
+            severity="info" if expert_memo_ids or not _is_china_related(target) else "warning",
+            related_evidence_ids=expert_memo_ids[:8],
         )
     )
 
@@ -313,6 +328,7 @@ def build_signal_draft(evidence: list[EvidenceItem], target: CompanyProfile, gro
     target_ids = [index for index, item in enumerate(evidence) if (item.ticker or "").upper() == target.ticker.upper()]
     transcript_ids = [index for index, item in enumerate(evidence) if item.evidence_type == "transcript"]
     presentation_ids = [index for index, item in enumerate(evidence) if item.evidence_type == "presentation"]
+    expert_memo_ids = [index for index, item in enumerate(evidence) if item.evidence_type == "expert_memo"]
     official_ids = [index for index, item in enumerate(evidence) if item.confidence_tier == "official"]
     external_ids = [index for index, item in enumerate(evidence) if item.confidence_tier in {"media", "platform", "search"}]
     charts = financial_charts or []
@@ -359,23 +375,23 @@ def build_signal_draft(evidence: list[EvidenceItem], target: CompanyProfile, gro
             ],
         ),
         ResearchSignal(
-            title="管理层措辞变化将是第一版深挖重点",
-            conclusion=f"已发现 {by_type.get('transcript', 0)} 条 transcript 与 {by_type.get('presentation', 0)} 条 presentation 候选；这些材料最适合识别需求、供给、价格、客户结构和风险措辞的边际变化。",
+            title="管理层措辞与专家/渠道纪要将是第一版深挖重点",
+            conclusion=f"已发现 {by_type.get('transcript', 0)} 条 transcript、{by_type.get('presentation', 0)} 条 presentation 与 {by_type.get('expert_memo', 0)} 条专家/渠道纪要候选；这些材料最适合识别需求、供给、价格、客户结构、库存和风险措辞的边际变化。",
             signal_type="高潜力待验证线索",
-            status="needs_validation" if transcript_ids or presentation_ids else "data_gap",
-            score=SignalScore(5, 3 if transcript_ids or presentation_ids else 1, 5, 5, 5, 4),
-            evidence_ids=[*transcript_ids[:4], *presentation_ids[:4]],
-            chart_hint="季度措辞热度折线 + 关键词证据抽屉",
-            chart_reason="折线适合展示同一关键词簇在连续季度中的出现强度变化，点击点位可打开原文和截图。",
-            reasoning_summary="AI 产业链拐点往往先出现在订单、供给、客户和价格的语气变化里，而不是只出现在财务表。",
+            status="needs_validation" if transcript_ids or presentation_ids or expert_memo_ids else "data_gap",
+            score=SignalScore(5, 3 if transcript_ids or presentation_ids or expert_memo_ids else 1, 5, 5, 5, 4),
+            evidence_ids=[*transcript_ids[:3], *presentation_ids[:3], *expert_memo_ids[:4]],
+            chart_hint="季度措辞热度折线 + 专家纪要主题簇 + 关键词证据抽屉",
+            chart_reason="折线适合展示同一关键词簇在连续季度中的出现强度变化，专家纪要主题簇适合捕捉官方披露之外的产业链边际线索。",
+            reasoning_summary="AI 产业链拐点往往先出现在订单、供给、客户、库存和价格的语气变化里，而不是只出现在财务表。",
             reasoning_chain=[
                 "按季度切分管理层问答和 prepared remarks。",
-                "抽取需求、供给、价格、库存、客户、竞争、CapEx 等关键词簇。",
-                "与可比公司同季度措辞变化横向比较，找出目标公司的独特变化。",
+                "同步抽取微信公众号/中文平台专家交流、产业链调研和渠道调研纪要中的需求、供给、价格、库存、客户、竞争、CapEx 等关键词簇。",
+                "与可比公司同季度措辞变化横向比较，并用官方披露或上下游数据交叉验证，找出目标公司的独特变化。",
             ],
             next_validation_actions=[
-                "下载候选网页/PDF并转为可引用文本。",
-                "生成每条措辞变化的原文引用和 PDF / 网页截图。",
+                "下载候选网页/PDF并转为可引用文本，微信文章优先保留网页截图和原始链接。",
+                "专家/渠道纪要只进入高潜力待验证线索，至少三方交叉验证后才升级为强结论。",
             ],
         ),
         ResearchSignal(
@@ -425,7 +441,7 @@ def build_signal_draft(evidence: list[EvidenceItem], target: CompanyProfile, gro
 def build_next_fetch_plan(evidence: list[EvidenceItem], signals: list[ResearchSignal], groups: list[Any], financial_charts: list[FinancialChart] | None = None) -> list[str]:
     plan = [
         "对已生成的 SEC XBRL / Wind 财务图表做异常扫描：同比/环比、利润率背离、R&D 强度、经营杠杆和可比公司横向排名。",
-        "补抓每家核心可比公司最近 4 个季度的 earnings call transcript 与 presentation。",
+        "补抓每家核心可比公司最近 4 个季度的 earnings call transcript、presentation 与中文专家/渠道纪要。",
         "对官方 PDF 执行表格抽取，建立指标-期间-来源页码-单元格映射。",
         "对管理层文字做季度切片，比较需求、供给、价格、库存、客户、CapEx、竞争等关键词簇。",
         "对 OpenAI / Anthropic / xAI 等私有玩家补抓融资估值、收入传闻、API 价格、模型能力和算力采购证据。",
@@ -689,8 +705,9 @@ def _collect_platform_evidence(company: CompanyProfile, years: list[str], quarte
     try:
         from .platform_discovery import discover_platform_links
 
-        raw_items = discover_platform_links(company.to_company_dict(), kinds=CORE_KINDS, years=years, quarters=quarters, max_results=8)
-        return [_to_evidence_item(item, company) for item in dedupe_links(raw_items)[:8]], []
+        limit = 16 if _is_china_related(company) else 8
+        raw_items = discover_platform_links(company.to_company_dict(), kinds=CORE_KINDS, years=years, quarters=quarters, max_results=limit)
+        return [_to_evidence_item(item, company) for item in dedupe_links(raw_items)[:limit]], []
     except Exception as exc:
         return [], [f"{company.ticker}: 平台搜索失败：{exc}"]
 
@@ -709,8 +726,8 @@ def _collect_china_evidence(company: CompanyProfile, years: list[str], quarters:
     try:
         from .china_sources import find_china_research_links
 
-        raw_items = find_china_research_links(company.to_company_dict(), kinds=CORE_KINDS, years=years, quarters=quarters, max_results=8)
-        return [_to_evidence_item(item, company) for item in dedupe_links(raw_items)[:8]], []
+        raw_items = find_china_research_links(company.to_company_dict(), kinds=CORE_KINDS, years=years, quarters=quarters, max_results=16)
+        return [_to_evidence_item(item, company) for item in dedupe_links(raw_items)[:16]], []
     except Exception as exc:
         return [], [f"{company.ticker}: 中文来源搜索失败：{exc}"]
 
@@ -751,6 +768,10 @@ def _confidence_for_item(source: str, url: str) -> tuple[str, str]:
         return "official", "监管披露或官方公告平台，优先作为财务与公告事实来源。"
     if any(token in text for token in ["investor", "ir.", "investors.", "annualreports", "tsmc.com", "nvidia.com"]):
         return "official", "公司官网或投资者关系域名，适合作为公司原始披露来源。"
+    if any(token in f"{source} {url}" for token in ["微信公众号", "雪球", "格隆汇", "富途", "老虎社区"]) or any(token in text for token in ["mp.weixin.qq.com", "weixin.sogou.com", "xueqiu.com", "gelonghui.com", "futunn.com", "laohu8.com"]):
+        return "platform", "微信公众号/公开中文纪要来源，常包含专家交流和产业链调研线索；正式结论前必须用公告、财务数据、同行披露或多个独立来源交叉验证。"
+    if any(token in f"{source} {url}" for token in ["华尔街见闻", "东方财富", "同花顺"]) or any(token in text for token in ["wallstreetcn.com", "eastmoney.com", "10jqka.com.cn"]):
+        return "media", "中文财经/投研平台，可用于外部事件、业绩说明会和产业链线索；正式强结论前需要交叉验证。"
     if any(token in text for token in ["motley", "marketbeat", "stock analysis", "earningscall", "seekingalpha"]):
         return "platform", "第三方业绩会/投研平台，需要与官方材料或其他平台交叉验证。"
     if any(token in text for token in ["bloomberg", "reuters", "wsj", "financial times", "nikkei", "the information"]):
@@ -762,6 +783,8 @@ def _confidence_for_item(source: str, url: str) -> tuple[str, str]:
 
 def _kind_for_item(kind: str, title: str, url: str) -> str:
     text = f"{kind} {title} {url}".casefold()
+    if "专家交流" in text or "专家电话" in text or "专家会议" in text or "行业专家" in text or "产业链专家" in text or "渠道调研" in text or "草根调研" in text or "专家访谈" in text:
+        return "expert_memo"
     if "transcript" in text or "call" in text or "纪要" in text:
         return "transcript"
     if "presentation" in text or "slide" in text or "deck" in text or "演示" in text:

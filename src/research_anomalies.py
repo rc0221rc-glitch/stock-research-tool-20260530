@@ -179,6 +179,35 @@ def _evidence_coverage_anomalies(evidence: list[EvidenceItem]) -> list[Objective
                 suggested_deep_dive="对同一公司连续季度和可比公司同季度的需求、价格、库存、客户、CapEx 关键词做变化分析。",
             )
         )
+    expert_memo_ids = _expert_memo_evidence_ids(evidence)
+    if len(expert_memo_ids) >= 2:
+        anomalies.append(
+            ObjectiveAnomaly(
+                anomaly_id="evidence:wechat-expert-memo-rich",
+                polarity=POSITIVE,
+                category="高潜力外部线索",
+                title="微信/中文专家交流纪要线索较多",
+                observation=f"当前找到 {len(expert_memo_ids)} 条专家交流、产业链调研或渠道调研类候选，可能包含官方文件之外的需求、价格、库存和客户变化线索。",
+                comparison_basis="微信公众号、雪球等中文投研平台候选证据统计。",
+                magnitude=f"{len(expert_memo_ids)} 条专家/调研纪要线索",
+                confidence_tier="platform",
+                evidence_ids=expert_memo_ids[:8],
+                suggested_deep_dive="逐条打开专家纪要，抽取具体观点和可验证事实，并至少用三类独立来源交叉验证：公司公告/财务数据、同行披露、产业链上下游或媒体报道。",
+            )
+        )
+    elif by_type.get("transcript", 0) > 0 and len(expert_memo_ids) == 0:
+        anomalies.append(
+            ObjectiveAnomaly(
+                anomaly_id="evidence:wechat-expert-memo-gap",
+                polarity=RISK,
+                category="资料缺口",
+                title="专家交流/产业链调研纪要缺口明显",
+                observation="虽然已有部分业绩会或纪要候选，但尚未识别到专家交流、产业链调研或渠道调研类线索。",
+                comparison_basis="中文外部纪要关键词覆盖度客观统计。",
+                confidence_tier="medium",
+                suggested_deep_dive="补抓微信公众号、雪球、华尔街见闻、卖方纪要转载等来源中的专家交流纪要，再与官方披露交叉验证。",
+            )
+        )
     elif by_type.get("transcript", 0) == 0:
         anomalies.append(
             ObjectiveAnomaly(
@@ -262,6 +291,16 @@ def _source_refs(point: object) -> list[str]:
 
 def _evidence_ids_by_type(evidence: list[EvidenceItem], evidence_type: str) -> list[int]:
     return [index for index, item in enumerate(evidence) if item.evidence_type == evidence_type]
+
+
+def _expert_memo_evidence_ids(evidence: list[EvidenceItem]) -> list[int]:
+    keywords = ["专家交流", "专家电话", "专家会议", "行业专家", "产业链专家", "渠道调研", "草根调研", "专家访谈"]
+    ids: list[int] = []
+    for index, item in enumerate(evidence):
+        text = f"{item.title} {item.source} {item.url} {item.confidence_reason}"
+        if item.evidence_type == "expert_memo" or (item.evidence_type == "transcript" and any(keyword in text for keyword in keywords)):
+            ids.append(index)
+    return ids
 
 
 def _dedupe_anomalies(anomalies: list[ObjectiveAnomaly]) -> list[ObjectiveAnomaly]:
