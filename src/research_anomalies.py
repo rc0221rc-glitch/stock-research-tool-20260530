@@ -3,7 +3,52 @@ from __future__ import annotations
 from collections import Counter
 from statistics import median
 
-from .research_models import EvidenceItem, FinancialChart, ObjectiveAnomaly
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
+
+from .research_models import EvidenceItem, FinancialChart
+
+try:
+    from .research_models import ObjectiveAnomaly
+except ImportError:
+    @dataclass
+    class ObjectiveAnomaly:
+        anomaly_id: str
+        polarity: str
+        category: str
+        title: str
+        observation: str
+        comparison_basis: str
+        magnitude: str = ""
+        metric: str = ""
+        ticker: str = ""
+        period: str = ""
+        confidence_tier: str = "medium"
+        source_refs: list[str] = field(default_factory=list)
+        evidence_ids: list[int] = field(default_factory=list)
+        chart_ids: list[str] = field(default_factory=list)
+        suggested_deep_dive: str = ""
+        selected_for_deep_dive: bool = False
+
+        def to_dict(self) -> dict[str, object]:
+            return {
+                "anomaly_id": self.anomaly_id,
+                "polarity": self.polarity,
+                "category": self.category,
+                "title": self.title,
+                "observation": self.observation,
+                "comparison_basis": self.comparison_basis,
+                "magnitude": self.magnitude,
+                "metric": self.metric,
+                "ticker": self.ticker,
+                "period": self.period,
+                "confidence_tier": self.confidence_tier,
+                "source_refs": self.source_refs,
+                "evidence_ids": self.evidence_ids,
+                "chart_ids": self.chart_ids,
+                "suggested_deep_dive": self.suggested_deep_dive,
+                "selected_for_deep_dive": self.selected_for_deep_dive,
+            }
 
 
 POSITIVE = "积极信号"
