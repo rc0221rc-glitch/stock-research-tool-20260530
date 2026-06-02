@@ -48,7 +48,11 @@ class MetricSeries:
     points: list[FinancialDataPoint]
 
 
-def build_financial_charts(companies: list[CompanyProfile], quarter_count: int = 4) -> tuple[list[FinancialChart], list[str]]:
+def build_financial_charts(
+    companies: list[CompanyProfile],
+    quarter_count: int = 4,
+    target: CompanyProfile | None = None,
+) -> tuple[list[FinancialChart], list[str]]:
     notes: list[str] = []
     all_series: dict[str, dict[str, MetricSeries]] = {}
     public_companies = [company for company in companies if company.is_public]
@@ -90,7 +94,7 @@ def build_financial_charts(companies: list[CompanyProfile], quarter_count: int =
                 if is_wind_available():
                     notes.append(f"{company.ticker}: Wind 财务数据抓取失败：{_compact_wind_error(exc)}")
         if company_series:
-            all_series[company.ticker] = company_series
+            all_series[_company_series_key(company)] = company_series
 
     if is_wind_available() and any(_series_uses_wind(series) for series in all_series.values()):
         notes.append(WIND_SOURCE_NOTE)
@@ -99,10 +103,12 @@ def build_financial_charts(companies: list[CompanyProfile], quarter_count: int =
     if not all_series:
         return charts, notes
 
-    target = public_companies[0] if public_companies else companies[0]
-    target_series = all_series.get(target.ticker, {})
-    if not target_series and all_series:
-        target_series = next(iter(all_series.values()))
+    target = target or companies[0]
+    target_series = all_series.get(_company_series_key(target), {})
+    if not target_series:
+        notes.append(
+            f"{target.ticker or target.name}: target financial series unavailable; skipped target-only charts rather than substituting peer data."
+        )
     revenue_points = target_series.get("revenue", MetricSeries("revenue", METRIC_LABELS["revenue"], [])).points
     if revenue_points:
         charts.append(
@@ -209,7 +215,41 @@ def build_financial_charts(companies: list[CompanyProfile], quarter_count: int =
                     source_note=_source_note_for_points(peer_points),
                 )
             )
+    charts = _validate_target_chart_identity(charts, target, notes)
     return charts, notes
+
+
+def _company_series_key(company: CompanyProfile) -> str:
+    return (company.ticker or company.name).upper()
+
+
+def _validate_target_chart_identity(
+    charts: list[FinancialChart],
+    target: CompanyProfile,
+    notes: list[str],
+) -> list[FinancialChart]:
+    target_ticker = (target.ticker or "").upper()
+    if not target_ticker:
+        return charts
+    valid_charts: list[FinancialChart] = []
+    for chart in charts:
+        if not chart.chart_id.startswith("target_"):
+            valid_charts.append(chart)
+            continue
+        mismatched_tickers = sorted(
+            {
+                point.ticker
+                for point in chart.points
+                if (point.ticker or "").upper() != target_ticker
+            }
+        )
+        if mismatched_tickers:
+            notes.append(
+                f"{target_ticker}: dropped {chart.chart_id} because target-only chart contained peer ticker(s): {', '.join(mismatched_tickers)}."
+            )
+            continue
+        valid_charts.append(chart)
+    return valid_charts
 
 
 def fetch_cninfo_metric_series(company: CompanyProfile, quarter_count: int = 4) -> dict[str, MetricSeries]:

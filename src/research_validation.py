@@ -27,6 +27,7 @@ def validate_research_draft(draft: ResearchDraft) -> ValidationReport:
         _check_no_evidence_gap_in_signal_list(draft),
         _check_readable_text_for_text_signals(draft),
         _check_financial_charts(draft),
+        _check_target_chart_identity(draft),
         _check_peer_comparables(draft),
         _check_source_traceability(draft),
         _check_pdf_or_web_screenshots(draft),
@@ -164,6 +165,32 @@ def _check_financial_charts(draft: ResearchDraft) -> ValidationCheck:
         f"当前财务图表 {len(draft.financial_charts)} 个。",
         f"至少 {MIN_FINANCIAL_CHARTS} 个核心财务/经营/比率/横向可比图表。",
         "继续补经营数据、分部数据、同比/环比、估值/CapEx/库存/backlog 等图表。",
+    )
+
+
+def _check_target_chart_identity(draft: ResearchDraft) -> ValidationCheck:
+    target_ticker = (draft.target.ticker or "").upper()
+    target_charts = [chart for chart in draft.financial_charts if chart.chart_id.startswith("target_")]
+    mismatches = []
+    if target_ticker:
+        for chart in target_charts:
+            wrong = sorted(
+                {
+                    point.ticker
+                    for point in chart.points
+                    if (point.ticker or "").upper() != target_ticker
+                }
+            )
+            if wrong:
+                mismatches.append(f"{chart.chart_id}: {', '.join(wrong)}")
+    return _check(
+        "target_chart_identity",
+        "目标公司图表身份",
+        "目标公司纵向财务图表只能包含目标公司自己的数据点，绝不能用同行数据兜底或串号。",
+        not mismatches,
+        f"目标 ticker={target_ticker or '无'}；目标图表 {len(target_charts)} 个；串号={'; '.join(mismatches) or '无'}。",
+        "所有 chart_id 以 target_ 开头的图表，其每个数据点 ticker 必须等于目标公司 ticker。",
+        "停止用同行数据替代目标公司缺失数据；缺失时宁可不生成目标图表，并在运行日志里说明。",
     )
 
 

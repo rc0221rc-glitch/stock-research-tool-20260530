@@ -59,7 +59,11 @@ def collect_research_draft(
             evidence.extend(items)
             run_notes.extend(notes)
 
-    financial_charts, financial_notes = build_financial_charts(_financial_comparison_companies(target, groups, companies), quarter_count=quarter_count)
+    financial_charts, financial_notes = build_financial_charts(
+        _financial_comparison_companies(target, groups, companies),
+        quarter_count=quarter_count,
+        target=target,
+    )
     run_notes.extend(financial_notes)
     evidence = _dedupe_evidence(evidence)
     evidence, backfill_notes = backfill_evidence_coverage(
@@ -170,7 +174,11 @@ def run_deep_analysis_for_selected_anomalies(
     selected = [anomaly for anomaly in draft.objective_anomalies if anomaly.selected_for_deep_dive]
     years = recent_years_for_quarters(draft.quarter_count)
     selected_companies = _selected_companies(draft.target, draft.comparable_groups, max_companies=12)
-    draft.financial_charts, financial_notes = build_financial_charts(_financial_comparison_companies(draft.target, draft.comparable_groups, selected_companies), quarter_count=draft.quarter_count)
+    draft.financial_charts, financial_notes = build_financial_charts(
+        _financial_comparison_companies(draft.target, draft.comparable_groups, selected_companies),
+        quarter_count=draft.quarter_count,
+        target=draft.target,
+    )
     draft.run_notes.extend(financial_notes)
     draft.evidence, backfill_notes = backfill_evidence_coverage(
         draft.evidence,

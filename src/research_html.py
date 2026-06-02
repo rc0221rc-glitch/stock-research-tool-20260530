@@ -348,7 +348,8 @@ def _financial_charts_section(draft: ResearchDraft, compact: bool) -> str:
           </div>
         </section>
         """
-    charts = draft.financial_charts[:3] if compact else draft.financial_charts
+    chart_items = list(enumerate(draft.financial_charts))
+    charts = chart_items[:3] if compact else chart_items
     return f"""
     <section class="section">
       <div class="section-title">
@@ -359,7 +360,7 @@ def _financial_charts_section(draft: ResearchDraft, compact: bool) -> str:
         </div>
       </div>
       <div class="chart-grid {'compact' if compact else ''}">
-        {''.join(_chart_card(chart, index) for index, chart in enumerate(charts))}
+        {''.join(_chart_card(chart, index) for index, chart in charts)}
       </div>
     </section>
     """

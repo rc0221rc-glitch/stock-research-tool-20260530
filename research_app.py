@@ -365,14 +365,22 @@ def _render_anomaly_group(prefix: str, anomalies: list[Any]) -> list[str]:
         st.info("暂无此类异常。")
         return []
     selected: list[str] = []
-    select_all = st.checkbox("全选本类异常", value=False, key=f"{prefix}_select_all_anomalies")
-    for anomaly in anomalies:
-        default_checked = select_all or anomaly.selected_for_deep_dive or anomaly.anomaly_id in st.session_state.selected_anomaly_ids
+    select_all_key = f"{prefix}_select_all_anomalies"
+    previous_select_all_key = f"{prefix}_select_all_anomalies_previous"
+    child_keys = [f"{prefix}_anomaly_{anomaly.anomaly_id}" for anomaly in anomalies]
+    previous_select_all = bool(st.session_state.get(previous_select_all_key, False))
+    select_all = st.checkbox("全选本类异常", value=False, key=select_all_key)
+    if select_all != previous_select_all:
+        for child_key in child_keys:
+            st.session_state[child_key] = select_all
+    st.session_state[previous_select_all_key] = select_all
+    for anomaly, child_key in zip(anomalies, child_keys):
+        if child_key not in st.session_state:
+            st.session_state[child_key] = anomaly.selected_for_deep_dive or anomaly.anomaly_id in st.session_state.selected_anomaly_ids or select_all
         with st.container(border=True):
             checked = st.checkbox(
                 anomaly.title,
-                value=default_checked,
-                key=f"{prefix}_anomaly_{anomaly.anomaly_id}",
+                key=child_key,
             )
             st.markdown(f"**观察：** {anomaly.observation}")
             st.markdown(f"**对比依据：** {anomaly.comparison_basis}")
