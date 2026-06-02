@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import html
 import sys
 from pathlib import Path
 from typing import Any
@@ -26,6 +27,21 @@ from src.research_universe import build_selected_groups, get_company_profile, re
 
 
 st.set_page_config(page_title="AI 行业研究工具", page_icon="🧠", layout="wide")
+
+st.markdown(
+    """
+    <style>
+      .static-table-wrap { overflow-x: auto; max-width: 100%; border: 1px solid #e5e7eb; border-radius: 12px; }
+      .static-table { width: 100%; border-collapse: collapse; font-size: 0.86rem; }
+      .static-table th { position: sticky; top: 0; background: #f8fafc; color: #0f172a; text-align: left; }
+      .static-table th, .static-table td { padding: 0.55rem 0.7rem; border-bottom: 1px solid #e5e7eb; vertical-align: top; }
+      .static-table td { max-width: 360px; word-break: break-word; }
+      .static-table a { color: #2563eb; text-decoration: none; font-weight: 600; }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 
 
 def init_state() -> None:
@@ -234,7 +250,7 @@ def render_draft_review(user_id: str, deepseek_api_key: str) -> None:
         if not draft.model_runs:
             st.error("没有任何模型调用记录。")
         else:
-            st.dataframe([run.to_dict() for run in draft.model_runs], use_container_width=True, hide_index=True)
+            _render_static_table([run.to_dict() for run in draft.model_runs], max_rows=20)
     with tab_charts:
         if not draft.financial_charts:
             st.warning("本轮没有生成真实财务图表。可能是 SEC / Wind / 巨潮 PDF 表格暂时不可用，或目标公司披露格式需要继续适配。")
@@ -255,7 +271,7 @@ def render_draft_review(user_id: str, deepseek_api_key: str) -> None:
                             "source": point.sources[0].url if point.sources else "",
                         }
                     )
-                st.dataframe(rows, use_container_width=True, hide_index=True)
+                _render_static_table(rows, max_rows=80)
     with tab_signals:
         for index, signal in enumerate(draft.signals, start=1):
             with st.container(border=True):
@@ -276,8 +292,20 @@ def render_draft_review(user_id: str, deepseek_api_key: str) -> None:
             status = "✅" if finding.status == "pass" else "⚠️"
             st.markdown(f"{status} **{finding.topic}**：{finding.finding}")
     with tab_evidence:
-        rows = [item.to_dict() for item in draft.evidence]
-        st.dataframe(rows, use_container_width=True, hide_index=True)
+        rows = [
+            {
+                "ticker": item.ticker,
+                "type": item.evidence_type,
+                "period": item.period,
+                "source": item.source,
+                "title": item.title,
+                "url": item.url,
+                "confidence": item.confidence_tier,
+                "quote": item.quote,
+            }
+            for item in draft.evidence
+        ]
+        _render_static_table(rows, max_rows=120)
     with tab_plan:
         for item in draft.next_fetch_plan:
             st.markdown(f"- {item}")
@@ -358,6 +386,46 @@ def render_anomaly_selector(user_id: str, deepseek_api_key: str) -> None:
                 st.success("深度分析完成：DeepSeek 已围绕你勾选的异常生成分析信号。")
             else:
                 st.error("深度分析未成功调用大模型；请检查 DeepSeek Key 或模型运行记录。")
+
+
+def _render_static_table(rows: list[dict[str, Any]], max_rows: int = 80) -> None:
+    if not rows:
+        st.caption("暂无数据。")
+        return
+    visible_rows = rows[:max_rows]
+    columns = list(visible_rows[0].keys())
+    header_html = "".join(f"<th>{html.escape(str(column))}</th>" for column in columns)
+    body_html = []
+    for row in visible_rows:
+        cells = []
+        for column in columns:
+            value = "" if row.get(column) is None else str(row.get(column))
+            if column == "url" and value.startswith(("http://", "https://")):
+                safe_url = html.escape(value, quote=True)
+                cells.append(f'<td><a href="{safe_url}" target="_blank" rel="noreferrer">打开链接</a></td>')
+            else:
+                cells.append(f"<td>{html.escape(_compact_cell(value))}</td>")
+        body_html.append(f"<tr>{''.join(cells)}</tr>")
+    st.markdown(
+        f"""
+        <div class="static-table-wrap">
+          <table class="static-table">
+            <thead><tr>{header_html}</tr></thead>
+            <tbody>{''.join(body_html)}</tbody>
+          </table>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    if len(rows) > max_rows:
+        st.caption(f"已显示前 {max_rows} 行，共 {len(rows)} 行；完整内容会进入 HTML 报告和下载文件。")
+
+
+def _compact_cell(value: str, limit: int = 240) -> str:
+    value = " ".join(value.split())
+    if len(value) <= limit:
+        return value
+    return value[: limit - 3] + "..."
 
 
 def _render_anomaly_group(prefix: str, anomalies: list[Any]) -> list[str]:
