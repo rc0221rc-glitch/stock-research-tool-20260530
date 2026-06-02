@@ -19,12 +19,18 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 def resolve_deepseek_api_key(explicit_key: str = "") -> str:
-    return explicit_key.strip() or os.getenv("DEEPSEEK_API_KEY", "").strip() or _read_local_env_secret("DEEPSEEK_API_KEY")
+    return (
+        explicit_key.strip()
+        or _read_streamlit_secret("DEEPSEEK_API_KEY")
+        or os.getenv("DEEPSEEK_API_KEY", "").strip()
+        or _read_local_env_secret("DEEPSEEK_API_KEY")
+    )
 
 
 def deepseek_key_status(explicit_key: str = "") -> dict[str, bool]:
     return {
         "ui": bool(explicit_key.strip()),
+        "streamlit_secrets": bool(_read_streamlit_secret("DEEPSEEK_API_KEY")),
         "process_env": bool(os.getenv("DEEPSEEK_API_KEY", "").strip()),
         "local_env": bool(_read_local_env_secret("DEEPSEEK_API_KEY")),
     }
@@ -106,8 +112,29 @@ def missing_deepseek_key_record() -> ModelRunRecord:
         started_at=now,
         completed_at=now,
         duration_seconds=0.0,
-        error="Missing DEEPSEEK_API_KEY or UI-provided DeepSeek API key; LLM analysis was not executed.",
+        error="Missing DeepSeek API key from UI, Streamlit Secrets, process env, or local .env; LLM analysis was not executed.",
     )
+
+
+def _read_streamlit_secret(name: str) -> str:
+    try:
+        import streamlit as st
+    except Exception:
+        return ""
+    try:
+        secrets = st.secrets
+        direct = str(secrets.get(name, "") or secrets.get(name.lower(), "") or "").strip()
+        if direct:
+            return direct
+        deepseek = secrets.get("deepseek", {})
+        if hasattr(deepseek, "get"):
+            for key in (name, name.lower(), "api_key", "key"):
+                value = str(deepseek.get(key, "") or "").strip()
+                if value:
+                    return value
+    except Exception:
+        return ""
+    return ""
 
 
 def _read_local_env_secret(name: str) -> str:

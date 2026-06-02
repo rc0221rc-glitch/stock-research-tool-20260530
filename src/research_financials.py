@@ -171,54 +171,53 @@ def fetch_company_metric_series(company: CompanyProfile, quarter_count: int = 4)
 
 
 def fetch_wind_metric_series(company: CompanyProfile, quarter_count: int = 4) -> dict[str, MetricSeries]:
-    windcode = normalize_windcode(company.ticker)
-    if not _looks_like_windcode(windcode):
-        return {}
     periods = _recent_completed_quarters(quarter_count)
-    raw_metric_points: dict[str, list[FinancialDataPoint]] = {}
-    for period, row, units in _fetch_wind_period_rows(windcode, periods):
-        if not row:
-            continue
-        currency = str(row.get("记账本位币") or row.get("交易币种") or "")
-        extracted = _extract_wind_metrics(row, units, period, currency)
-        for metric, value in extracted.items():
-            if value is None:
+    for windcode in _windcode_candidates(company):
+        raw_metric_points: dict[str, list[FinancialDataPoint]] = {}
+        for period, row, units in _fetch_wind_period_rows(windcode, periods):
+            if not row:
                 continue
-            source = _wind_source(company, windcode, period, value["column"], value["unit"])
-            normalized_value = _normalize_wind_value(float(value["value"]), value["unit"])
-            normalized_unit = _wind_unit_label(value["unit"], currency)
-            raw_metric_points.setdefault(metric, []).append(
-                FinancialDataPoint(
-                    ticker=company.ticker,
-                    company=company.name,
-                    metric=metric,
-                    metric_label=METRIC_LABELS[metric],
-                    period=period,
-                    end_date=_quarter_end_date(period),
-                    value=normalized_value,
-                    display_value=_format_wind_value(normalized_value, normalized_unit, currency),
-                    unit=normalized_unit,
-                    series=company.ticker,
-                    sources=[source],
+            currency = str(row.get("记账本位币") or row.get("交易币种") or "")
+            extracted = _extract_wind_metrics(row, units, period, currency)
+            for metric, value in extracted.items():
+                if value is None:
+                    continue
+                source = _wind_source(company, windcode, period, value["column"], value["unit"])
+                normalized_value = _normalize_wind_value(float(value["value"]), value["unit"])
+                normalized_unit = _wind_unit_label(value["unit"], currency)
+                raw_metric_points.setdefault(metric, []).append(
+                    FinancialDataPoint(
+                        ticker=company.ticker,
+                        company=company.name,
+                        metric=metric,
+                        metric_label=METRIC_LABELS[metric],
+                        period=period,
+                        end_date=_quarter_end_date(period),
+                        value=normalized_value,
+                        display_value=_format_wind_value(normalized_value, normalized_unit, currency),
+                        unit=normalized_unit,
+                        series=company.ticker,
+                        sources=[source],
+                    )
                 )
-            )
 
-    series: dict[str, MetricSeries] = {}
-    for metric, points in raw_metric_points.items():
-        if points:
-            series[metric] = MetricSeries(metric, METRIC_LABELS[metric], sorted(points, key=lambda point: point.end_date))
+        series: dict[str, MetricSeries] = {}
+        for metric, points in raw_metric_points.items():
+            if points:
+                series[metric] = MetricSeries(metric, METRIC_LABELS[metric], sorted(points, key=lambda point: point.end_date))
 
-    derived = _derived_margin_points(company, raw_metric_points, "gross_margin", "gross_profit", "revenue")
-    if derived and "gross_margin" not in series:
-        series["gross_margin"] = MetricSeries("gross_margin", METRIC_LABELS["gross_margin"], derived)
-    derived = _derived_margin_points(company, raw_metric_points, "operating_margin", "operating_income", "revenue")
-    if derived and "operating_margin" not in series:
-        series["operating_margin"] = MetricSeries("operating_margin", METRIC_LABELS["operating_margin"], derived)
-    derived = _derived_margin_points(company, raw_metric_points, "rd_intensity", "rd_expense", "revenue")
-    if derived and "rd_intensity" not in series:
-        series["rd_intensity"] = MetricSeries("rd_intensity", METRIC_LABELS["rd_intensity"], derived)
-    return series
-
+        derived = _derived_margin_points(company, raw_metric_points, "gross_margin", "gross_profit", "revenue")
+        if derived and "gross_margin" not in series:
+            series["gross_margin"] = MetricSeries("gross_margin", METRIC_LABELS["gross_margin"], derived)
+        derived = _derived_margin_points(company, raw_metric_points, "operating_margin", "operating_income", "revenue")
+        if derived and "operating_margin" not in series:
+            series["operating_margin"] = MetricSeries("operating_margin", METRIC_LABELS["operating_margin"], derived)
+        derived = _derived_margin_points(company, raw_metric_points, "rd_intensity", "rd_expense", "revenue")
+        if derived and "rd_intensity" not in series:
+            series["rd_intensity"] = MetricSeries("rd_intensity", METRIC_LABELS["rd_intensity"], derived)
+        if series:
+            return series
+    return {}
 
 def _fetch_wind_period_rows(windcode: str, periods: list[str]) -> list[tuple[str, dict[str, Any], dict[str, str]]]:
     bulk_rows = _fetch_wind_bulk_rows(windcode, periods)
@@ -368,6 +367,38 @@ def _needs_wind_financials(company: CompanyProfile, series: dict[str, MetricSeri
     return is_china_or_hk and not (has_revenue and has_margin)
 
 
+def _windcode_candidates(company: CompanyProfile) -> list[str]:
+    raw_values = [company.ticker, company.local_code, *company.aliases]
+    candidates: list[str] = []
+    for value in raw_values:
+        windcode = normalize_windcode(str(value))
+        if _looks_like_windcode(windcode) and windcode not in candidates:
+            candidates.append(windcode)
+        for inferred in _infer_windcodes_from_market(company, str(value)):
+            if inferred not in candidates:
+                candidates.append(inferred)
+    return candidates
+
+
+def _infer_windcodes_from_market(company: CompanyProfile, value: str) -> list[str]:
+    code = (value or "").strip().upper()
+    if not code or "." in code or not re.fullmatch(r"[A-Z0-9]{1,8}", code):
+        return []
+    text = f"{company.market} {company.exchange} {company.country}".casefold()
+    suffixes: list[str] = []
+    if "xetra" in text or "germany" in text or "德国" in text:
+        suffixes.append(".DE")
+    if "tse" in text or "japan" in text or "日本" in text:
+        suffixes.append(".T")
+    if "krx" in text or "korea" in text or "韩国" in text:
+        suffixes.append(".KS")
+    if "twse" in text or "taiwan" in text or "台湾" in text:
+        suffixes.append(".TW")
+    if "hkex" in text or "hong kong" in text or "港股" in text or "香港" in text:
+        suffixes.append(".HK")
+    return [normalize_windcode(f"{code}{suffix}") for suffix in suffixes if _looks_like_windcode(normalize_windcode(f"{code}{suffix}"))]
+
+
 def _prefer_primary_series(primary: dict[str, MetricSeries], secondary: dict[str, MetricSeries]) -> dict[str, MetricSeries]:
     merged = dict(primary)
     for metric, series in secondary.items():
@@ -386,7 +417,7 @@ def _series_uses_wind(series_by_metric: dict[str, MetricSeries]) -> bool:
 
 
 def _looks_like_windcode(value: str) -> bool:
-    return bool(re.fullmatch(r"[A-Z0-9]{1,8}\.(SH|SZ|BJ|HK|O|N)", value or ""))
+    return bool(re.fullmatch(r"[A-Z0-9]{1,8}\.(SH|SZ|BJ|HK|O|N|T|KS|KQ|TW|DE|F|L|PA|AS|SW)", value or ""))
 
 
 def _recent_completed_quarters(count: int, today: date | None = None) -> list[str]:

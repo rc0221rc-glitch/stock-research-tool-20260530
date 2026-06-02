@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from typing import Any
 
+from .company_search_global import find_best_company
 from .research_models import CompanyProfile, ComparableGroup
 
 
@@ -125,6 +127,9 @@ def get_company_profile(query: str) -> CompanyProfile:
     for company in [*AI_COMPANY_UNIVERSE.values(), *EXTRA_COMPANIES.values()]:
         if query.casefold() in {company.name.casefold(), company.ticker.casefold()}:
             return company
+    discovered = _discover_global_company(query)
+    if discovered:
+        return discovered
     return CompanyProfile(ticker or query, query.strip() or ticker, "Unknown", "target company", "auto-discovered", "User-entered target")
 
 
@@ -178,6 +183,62 @@ def build_selected_groups(base_groups: list[ComparableGroup], selected_by_group:
             )
         )
     return selected_groups
+
+
+def _discover_global_company(query: str) -> CompanyProfile | None:
+    try:
+        company = find_best_company(query)
+    except Exception:
+        company = None
+    if not company:
+        return None
+    return _company_profile_from_global_result(company, query)
+
+
+def _company_profile_from_global_result(company: dict[str, Any], query: str) -> CompanyProfile:
+    ticker = str(company.get("ticker") or company.get("local_code") or query or "").strip().upper()
+    local_code = str(company.get("local_code") or "").strip()
+    name = str(company.get("name_en") or company.get("name") or query or ticker).strip()
+    market = str(company.get("market") or company.get("country") or "Global listed company").strip()
+    exchange = str(company.get("exchange") or "").strip()
+    country = str(company.get("country") or "").strip()
+    source = str(company.get("source") or "global company search").strip()
+    aliases = tuple(str(alias).strip() for alias in (company.get("aliases") or []) if str(alias).strip())
+    return CompanyProfile(
+        ticker=ticker,
+        name=name,
+        market=market,
+        role="global listed company",
+        segment=_segment_hint(company),
+        description=_global_company_description(company),
+        cik=str(company.get("cik") or "").strip(),
+        ir_url=str(company.get("ir_url") or "").strip(),
+        is_public=True,
+        source_hint=source,
+        local_code=local_code,
+        exchange=exchange,
+        country=country,
+        aliases=aliases,
+    )
+
+
+def _segment_hint(company: dict[str, Any]) -> str:
+    exchange = str(company.get("exchange") or "").strip()
+    market = str(company.get("market") or "").strip()
+    if exchange or market:
+        return "global listed company / " + " / ".join(value for value in [market, exchange] if value)
+    return "global listed company"
+
+
+def _global_company_description(company: dict[str, Any]) -> str:
+    parts = [
+        str(company.get("name_en") or company.get("name") or "").strip(),
+        str(company.get("exchange") or "").strip(),
+        str(company.get("country") or "").strip(),
+    ]
+    source = str(company.get("source") or "global company search").strip()
+    text = " · ".join(part for part in parts if part)
+    return f"{text}; discovered via {source}" if text else f"Discovered via {source}"
 
 
 def _fallback_blueprints(target: CompanyProfile) -> list[dict[str, object]]:

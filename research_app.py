@@ -47,10 +47,18 @@ def render_sidebar() -> tuple[str, str, str]:
         deepseek_api_key = st.text_input("DeepSeek API Key", value="", type="password", help="用于真正调用大模型生成/改写研究信号；不会写入仓库。")
         key_status = deepseek_key_status(deepseek_api_key)
         if any(key_status.values()):
-            source = "页面输入" if key_status["ui"] else "进程环境变量" if key_status["process_env"] else "本地 .env"
+            source = (
+                "页面输入"
+                if key_status["ui"]
+                else "Streamlit Secrets"
+                if key_status.get("streamlit_secrets")
+                else "进程环境变量"
+                if key_status["process_env"]
+                else "本地 .env"
+            )
             st.success(f"DeepSeek Key 已可用（来源：{source}）。")
         else:
-            st.error("DeepSeek Key 不可用：请在这里输入，或在未提交的 `.env` 写入 DEEPSEEK_API_KEY。")
+            st.error("DeepSeek Key 不可用：请在 Streamlit Secrets / 环境变量 / 本地 `.env` 写入 DEEPSEEK_API_KEY，或临时在页面输入。")
         claude_api_key = st.text_input("Anthropic API Key（可选）", value="", type="password", help="当前仅传给已有下载器兜底逻辑；正式多模型研究层后续接入。")
         st.divider()
         st.subheader("权限与数据库")

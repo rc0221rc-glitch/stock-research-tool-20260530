@@ -108,7 +108,7 @@ def normalize_windcode(value: str) -> str:
     if re.fullmatch(r"\d{1,5}\.HK", ticker):
         code = ticker.split(".", 1)[0].zfill(5)
         return f"{code}.HK"
-    if ticker.endswith((".SH", ".SZ", ".BJ", ".HK", ".O", ".N")):
+    if ticker.endswith((".SH", ".SZ", ".BJ", ".HK", ".O", ".N", ".T", ".KS", ".KQ", ".TW", ".DE", ".F", ".L", ".PA", ".AS", ".SW")):
         return ticker
     return ticker
 

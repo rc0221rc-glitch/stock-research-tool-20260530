@@ -16,6 +16,10 @@ class CompanyProfile:
     ir_url: str = ""
     is_public: bool = True
     source_hint: str = ""
+    local_code: str = ""
+    exchange: str = ""
+    country: str = ""
+    aliases: tuple[str, ...] = field(default_factory=tuple)
 
     def to_company_dict(self) -> dict[str, Any]:
         return {
@@ -23,10 +27,13 @@ class CompanyProfile:
             "name": self.name,
             "name_en": self.name,
             "market": self.market,
-            "country": self.market,
+            "country": self.country or self.market,
+            "local_code": self.local_code,
+            "exchange": self.exchange,
             "cik": self.cik,
             "ir_url": self.ir_url,
             "source": self.source_hint or "AI research universe",
+            "aliases": list(self.aliases),
         }
 
 
