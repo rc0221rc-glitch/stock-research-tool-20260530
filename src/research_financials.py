@@ -19,6 +19,8 @@ METRIC_CONCEPTS: dict[str, list[str]] = {
     "rd_expense": ["ResearchAndDevelopmentExpense", "ResearchAndDevelopmentExpenseExcludingAcquiredInProcessCost"],
     "operating_income": ["OperatingIncomeLoss"],
     "net_income": ["NetIncomeLoss"],
+    "cash_from_operations": ["NetCashProvidedByUsedInOperatingActivities", "NetCashProvidedByUsedInOperatingActivitiesContinuingOperations"],
+    "capex": ["PaymentsToAcquirePropertyPlantAndEquipment", "PaymentsToAcquireProductiveAssets"],
 }
 
 METRIC_LABELS = {
@@ -31,6 +33,9 @@ METRIC_LABELS = {
     "operating_margin": "Operating Margin",
     "rd_intensity": "R&D / Revenue",
     "cash_from_operations": "Operating Cash Flow",
+    "capex": "Capital Expenditures",
+    "free_cash_flow": "Free Cash Flow",
+    "capex_intensity": "CapEx / Revenue",
     "inventory": "Inventory",
     "construction_in_progress": "Construction in Progress",
 }
@@ -113,7 +118,7 @@ def build_financial_charts(companies: list[CompanyProfile], quarter_count: int =
             )
         )
 
-    for supplemental_metric in ["net_income", "cash_from_operations", "inventory", "construction_in_progress"]:
+    for supplemental_metric in ["net_income", "cash_from_operations", "capex", "free_cash_flow", "inventory", "construction_in_progress"]:
         points = target_series.get(supplemental_metric, MetricSeries(supplemental_metric, METRIC_LABELS.get(supplemental_metric, supplemental_metric), [])).points
         if points:
             charts.append(
@@ -129,7 +134,7 @@ def build_financial_charts(companies: list[CompanyProfile], quarter_count: int =
                 )
             )
 
-    for margin_metric in ["gross_margin", "operating_margin", "rd_intensity"]:
+    for margin_metric in ["gross_margin", "operating_margin", "rd_intensity", "capex_intensity"]:
         points = target_series.get(margin_metric, MetricSeries(margin_metric, METRIC_LABELS[margin_metric], [])).points
         if points:
             charts.append(
@@ -189,6 +194,21 @@ def build_financial_charts(companies: list[CompanyProfile], quarter_count: int =
                 source_note=_source_note_for_points(peer_operating_margin),
             )
         )
+    for peer_metric in ["rd_intensity", "capex_intensity"]:
+        peer_points = _latest_peer_points(all_series, peer_metric)
+        if len(peer_points) >= 2:
+            charts.append(
+                FinancialChart(
+                    chart_id=f"peer_latest_{peer_metric}",
+                    title=f"Latest {METRIC_LABELS[peer_metric]}: target vs selected public comparables",
+                    subtitle=f"{METRIC_LABELS[peer_metric]} is calculated from reported quarterly financial fields where available.",
+                    chart_type="bar",
+                    y_axis="%",
+                    points=peer_points,
+                    insight=_peer_insight(peer_metric, peer_points),
+                    source_note=_source_note_for_points(peer_points),
+                )
+            )
     return charts, notes
 
 
@@ -231,6 +251,12 @@ def fetch_cninfo_metric_series(company: CompanyProfile, quarter_count: int = 4) 
     derived = _derived_margin_points(company, raw_metric_points, "rd_intensity", "rd_expense", "revenue")
     if derived:
         series["rd_intensity"] = MetricSeries("rd_intensity", METRIC_LABELS["rd_intensity"], sorted(derived, key=lambda point: point.end_date)[-quarter_count:])
+    derived = _derived_margin_points(company, raw_metric_points, "capex_intensity", "capex", "revenue")
+    if derived:
+        series["capex_intensity"] = MetricSeries("capex_intensity", METRIC_LABELS["capex_intensity"], sorted(derived, key=lambda point: point.end_date)[-quarter_count:])
+    fcf = _derived_free_cash_flow_points(company, raw_metric_points)
+    if fcf:
+        series["free_cash_flow"] = MetricSeries("free_cash_flow", METRIC_LABELS["free_cash_flow"], sorted(fcf, key=lambda point: point.end_date)[-quarter_count:])
     return series
 
 
@@ -512,6 +538,12 @@ def fetch_company_metric_series(company: CompanyProfile, quarter_count: int = 4)
     derived = _derived_margin_points(company, raw_metric_points, "rd_intensity", "rd_expense", "revenue")
     if derived:
         series["rd_intensity"] = MetricSeries("rd_intensity", METRIC_LABELS["rd_intensity"], derived)
+    derived = _derived_margin_points(company, raw_metric_points, "capex_intensity", "capex", "revenue")
+    if derived:
+        series["capex_intensity"] = MetricSeries("capex_intensity", METRIC_LABELS["capex_intensity"], derived)
+    fcf = _derived_free_cash_flow_points(company, raw_metric_points)
+    if fcf:
+        series["free_cash_flow"] = MetricSeries("free_cash_flow", METRIC_LABELS["free_cash_flow"], fcf)
     return series
 
 
@@ -561,6 +593,12 @@ def fetch_wind_metric_series(company: CompanyProfile, quarter_count: int = 4) ->
         derived = _derived_margin_points(company, raw_metric_points, "rd_intensity", "rd_expense", "revenue")
         if derived and "rd_intensity" not in series:
             series["rd_intensity"] = MetricSeries("rd_intensity", METRIC_LABELS["rd_intensity"], derived)
+        derived = _derived_margin_points(company, raw_metric_points, "capex_intensity", "capex", "revenue")
+        if derived and "capex_intensity" not in series:
+            series["capex_intensity"] = MetricSeries("capex_intensity", METRIC_LABELS["capex_intensity"], derived)
+        fcf = _derived_free_cash_flow_points(company, raw_metric_points)
+        if fcf and "free_cash_flow" not in series:
+            series["free_cash_flow"] = MetricSeries("free_cash_flow", METRIC_LABELS["free_cash_flow"], fcf)
         if series:
             return series
     if errors:
@@ -645,6 +683,14 @@ def _extract_wind_metrics(row: dict[str, Any], units: dict[str, str], period: st
     operating_income = _pick_numeric_column(row, units, include=["营业利润"], exclude=["营业利润率"])
     net_income = _pick_numeric_column(row, units, include=["净利润"], exclude=["净利率", "ROE", "ROA"])
     rd_expense = _pick_numeric_column(row, units, include=["研发费用"], exclude=["占比", "率"])
+    cash_from_operations = _pick_numeric_column(row, units, include=["经营活动产生的现金流量净额"], exclude=[])
+    if cash_from_operations is None:
+        cash_from_operations = _pick_numeric_column(row, units, include=["经营性现金流"], exclude=["率"])
+    if cash_from_operations is None:
+        cash_from_operations = _pick_numeric_column(row, units, include=["经营现金流"], exclude=["率"])
+    capex = _pick_numeric_column(row, units, include=["购建固定资产"], exclude=[])
+    if capex is None:
+        capex = _pick_numeric_column(row, units, include=["资本开支"], exclude=["率", "占比"])
     gross_margin = _pick_numeric_column(row, units, include=["毛利率"], exclude=[])
     if gross_margin is None:
         gross_margin = _pick_ratio_column(row, units, include=["毛利"], exclude=["毛利润", "毛利额"])
@@ -659,6 +705,8 @@ def _extract_wind_metrics(row: dict[str, Any], units: dict[str, str], period: st
         "operating_income": operating_income,
         "net_income": net_income,
         "rd_expense": rd_expense,
+        "cash_from_operations": cash_from_operations,
+        "capex": capex,
         "gross_margin": _as_percent_metric(gross_margin, period, "销售毛利率") if gross_margin else None,
         "operating_margin": _as_percent_metric(operating_margin, period, "营业利润率") if operating_margin else None,
         "rd_intensity": _as_percent_metric(rd_intensity, period, "研发费用占收入") if rd_intensity else None,
@@ -924,7 +972,7 @@ def _points_for_concepts(
     quarter_count: int,
 ) -> list[FinancialDataPoint]:
     candidates: list[dict[str, Any]] = []
-    concept_used = ""
+    all_items: list[dict[str, Any]] = []
     for concept in concepts:
         fact = us_gaap.get(concept)
         if not fact:
@@ -938,28 +986,26 @@ def _points_for_concepts(
         for item in concept_items:
             if _is_quarter_fact(item):
                 concept_candidates.append(item)
-        if concept_candidates and _latest_end_date(concept_candidates) >= _latest_end_date(candidates):
-            candidates = concept_candidates
-            all_items = concept_items
-            concept_used = concept
-        if candidates and _latest_end_date(candidates) >= "2023-01-01":
-            break
+        candidates.extend(concept_candidates)
+        all_items.extend(concept_items)
 
+    base_items = _normalize_to_quarter_items(candidates, all_items or candidates)
     unique: dict[str, dict[str, Any]] = {}
-    for item in candidates:
+    for item in base_items:
         key = str(item.get("end", ""))
         if not key:
             continue
         existing = unique.get(key)
         if not existing or _quarter_item_score(item) > _quarter_item_score(existing):
             unique[key] = item
-    quarter_items = _with_derived_q4(list(unique.values()), all_items if "all_items" in locals() else candidates)
+    quarter_items = _with_derived_q4(list(unique.values()), all_items or candidates)
+    quarter_items = _dedupe_quarter_items(quarter_items)
     latest = sorted(quarter_items, key=lambda item: str(item.get("end", "")), reverse=True)[:quarter_count]
     points: list[FinancialDataPoint] = []
     for item in sorted(latest, key=lambda value: str(value.get("end", ""))):
         value = float(item.get("val") or 0)
         period = _period_label(item)
-        source = _source_for_item(company, item, concept_used or str(item.get("concept", "")))
+        source = _source_for_item(company, item, str(item.get("concept", "")))
         points.append(
             FinancialDataPoint(
                 ticker=company.ticker,
@@ -976,6 +1022,57 @@ def _points_for_concepts(
             )
         )
     return points
+
+
+def _normalize_to_quarter_items(candidates: list[dict[str, Any]], all_candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    quarter_items: list[dict[str, Any]] = list(candidates)
+    cumulative_by_fy: dict[str, dict[str, dict[str, Any]]] = {}
+    for item in all_candidates:
+        form = str(item.get("form", "")).upper()
+        fp = str(item.get("fp") or "").upper()
+        fy = str(item.get("fy") or "")
+        start = str(item.get("start") or "")
+        end = str(item.get("end") or "")
+        if form not in {"10-Q", "6-K"} or fp not in {"Q1", "Q2", "Q3"} or not fy or not start or not end:
+            continue
+        duration = _duration_days(start, end)
+        if (fp == "Q1" and 55 <= duration <= 115) or (fp in {"Q2", "Q3"} and 115 < duration <= 285):
+            existing = cumulative_by_fy.setdefault(fy, {}).get(fp)
+            if not existing or _quarter_item_score(item) > _quarter_item_score(existing):
+                cumulative_by_fy[fy][fp] = item
+
+    for fy, by_fp in cumulative_by_fy.items():
+        q1 = by_fp.get("Q1")
+        q2 = by_fp.get("Q2")
+        q3 = by_fp.get("Q3")
+        if q1:
+            quarter_items.append(q1)
+        if q1 and q2:
+            quarter_items.append(_single_quarter_from_ytd(q2, float(q2.get("val") or 0) - float(q1.get("val") or 0), "Q2"))
+        if q2 and q3:
+            quarter_items.append(_single_quarter_from_ytd(q3, float(q3.get("val") or 0) - float(q2.get("val") or 0), "Q3"))
+
+    return quarter_items
+
+
+def _single_quarter_from_ytd(item: dict[str, Any], value: float, fp: str) -> dict[str, Any]:
+    normalized = dict(item)
+    normalized["val"] = value
+    normalized["fp"] = fp
+    normalized["derived_quarter"] = True
+    return normalized
+
+
+def _dedupe_quarter_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    unique: dict[str, dict[str, Any]] = {}
+    for item in items:
+        end = str(item.get("end") or "")
+        fp = str(item.get("fp") or "").upper()
+        key = end or f"{item.get('fy')}:{fp}:{item.get('frame')}"
+        existing = unique.get(key)
+        if not existing or _quarter_item_score(item) > _quarter_item_score(existing):
+            unique[key] = item
+    return sorted(unique.values(), key=lambda item: str(item.get("end") or ""))
 
 
 def _derived_margin_points(
@@ -1012,13 +1109,41 @@ def _derived_margin_points(
     return points
 
 
+def _derived_free_cash_flow_points(
+    company: CompanyProfile,
+    raw_metric_points: dict[str, list[FinancialDataPoint]],
+) -> list[FinancialDataPoint]:
+    operating_cash = {point.end_date: point for point in raw_metric_points.get("cash_from_operations", [])}
+    capex = {point.end_date: point for point in raw_metric_points.get("capex", [])}
+    points: list[FinancialDataPoint] = []
+    for end_date in sorted(set(operating_cash) & set(capex)):
+        value = operating_cash[end_date].value - abs(capex[end_date].value)
+        sources = [*operating_cash[end_date].sources, *capex[end_date].sources]
+        points.append(
+            FinancialDataPoint(
+                ticker=company.ticker,
+                company=company.name,
+                metric="free_cash_flow",
+                metric_label=METRIC_LABELS["free_cash_flow"],
+                period=operating_cash[end_date].period,
+                end_date=end_date,
+                value=value,
+                display_value=_format_value(value, operating_cash[end_date].unit or capex[end_date].unit),
+                unit=operating_cash[end_date].unit or capex[end_date].unit,
+                series=company.ticker,
+                sources=sources,
+            )
+        )
+    return points
+
+
 def _latest_peer_points(all_series: dict[str, dict[str, MetricSeries]], metric: str) -> list[FinancialDataPoint]:
     points: list[FinancialDataPoint] = []
     for ticker, series_by_metric in all_series.items():
         series = series_by_metric.get(metric)
         if not series or not series.points:
             continue
-        point = series.points[-1]
+        point = sorted(series.points, key=lambda item: item.end_date)[-1]
         points.append(point)
     return sorted(points, key=lambda point: point.value, reverse=True)
 

@@ -10,6 +10,7 @@ from .research_financials import build_financial_charts
 from .research_llm import generate_deepseek_research_signals, missing_deepseek_key_record, resolve_deepseek_api_key
 from .research_models import AuditFinding, CompanyProfile, EvidenceItem, FinancialChart, ObjectiveAnomaly, ResearchDraft, ResearchSignal, SignalScore
 from .research_screenshots import capture_evidence_screenshots
+from .research_text_insights import build_text_theme_anomalies, enrich_readable_evidence
 from .research_universe import get_company_profile, recommend_comparable_groups
 from .research_validation import validate_research_draft
 from .utils import dedupe_links, run_limited
@@ -58,7 +59,7 @@ def collect_research_draft(
             evidence.extend(items)
             run_notes.extend(notes)
 
-    financial_charts, financial_notes = build_financial_charts(companies, quarter_count=quarter_count)
+    financial_charts, financial_notes = build_financial_charts(_financial_comparison_companies(target, groups, companies), quarter_count=quarter_count)
     run_notes.extend(financial_notes)
     evidence = _dedupe_evidence(evidence)
     evidence, backfill_notes = backfill_evidence_coverage(
@@ -71,9 +72,13 @@ def collect_research_draft(
         include_external_search=include_external_search,
     )
     run_notes.extend(backfill_notes)
+    evidence, text_notes = enrich_readable_evidence(evidence)
+    run_notes.extend(text_notes)
     if capture_screenshots:
         run_notes.extend(capture_evidence_screenshots(evidence, limit=3))
-    objective_anomalies = build_objective_anomalies(evidence, financial_charts)
+    all_objective_anomalies = _dedupe_objective_anomalies([*build_objective_anomalies(evidence, financial_charts), *build_text_theme_anomalies(evidence)])
+    evidence_gap_anomalies = [anomaly for anomaly in all_objective_anomalies if anomaly.category == "资料缺口"]
+    objective_anomalies = [anomaly for anomaly in all_objective_anomalies if anomaly.category != "资料缺口"]
     if selected_anomalies:
         selected_ids = {anomaly.anomaly_id for anomaly in selected_anomalies}
         objective_anomalies = [
@@ -81,7 +86,7 @@ def collect_research_draft(
             for anomaly in objective_anomalies
         ]
     audit_findings = audit_evidence(evidence, target, groups, financial_charts)
-    fallback_signals = build_signal_draft(evidence, target, groups, financial_charts)
+    fallback_signals = build_signal_draft(evidence, target, groups, financial_charts, objective_anomalies)
     _annotate_and_downgrade_weak_strong_signals(fallback_signals, evidence)
     signals = fallback_signals
     next_fetch_plan = build_next_fetch_plan(evidence, signals, groups, financial_charts)
@@ -132,6 +137,7 @@ def collect_research_draft(
             ],
             "workflow_stage": "deep_analysis_ready" if selected_anomalies else "objective_scan_ready",
             "selected_anomaly_ids": [anomaly.anomaly_id for anomaly in selected_anomalies or []],
+            "evidence_gap_anomalies": [anomaly.to_dict() for anomaly in evidence_gap_anomalies],
             "permissions": {
                 "visibility": "authorized",
                 "access_logs": "local_or_supabase",
@@ -163,6 +169,9 @@ def run_deep_analysis_for_selected_anomalies(
     ]
     selected = [anomaly for anomaly in draft.objective_anomalies if anomaly.selected_for_deep_dive]
     years = recent_years_for_quarters(draft.quarter_count)
+    selected_companies = _selected_companies(draft.target, draft.comparable_groups, max_companies=12)
+    draft.financial_charts, financial_notes = build_financial_charts(_financial_comparison_companies(draft.target, draft.comparable_groups, selected_companies), quarter_count=draft.quarter_count)
+    draft.run_notes.extend(financial_notes)
     draft.evidence, backfill_notes = backfill_evidence_coverage(
         draft.evidence,
         target=draft.target,
@@ -175,7 +184,9 @@ def run_deep_analysis_for_selected_anomalies(
     draft.run_notes.extend(backfill_notes)
     if not any(item.screenshot_path for item in draft.evidence):
         draft.run_notes.extend(capture_evidence_screenshots(draft.evidence, limit=3))
-    draft.objective_anomalies = build_objective_anomalies(draft.evidence, draft.financial_charts)
+    all_objective_anomalies = _dedupe_objective_anomalies([*build_objective_anomalies(draft.evidence, draft.financial_charts), *build_text_theme_anomalies(draft.evidence)])
+    draft.run_metadata["evidence_gap_anomalies"] = [anomaly.to_dict() for anomaly in all_objective_anomalies if anomaly.category == "资料缺口"]
+    draft.objective_anomalies = [anomaly for anomaly in all_objective_anomalies if anomaly.category != "资料缺口"]
     draft.objective_anomalies = [
         ObjectiveAnomaly(**{**anomaly.to_dict(), "selected_for_deep_dive": anomaly.anomaly_id in selected_ids})
         for anomaly in draft.objective_anomalies
@@ -192,7 +203,7 @@ def run_deep_analysis_for_selected_anomalies(
         "validation_ready",
     ]
 
-    fallback_signals = build_signal_draft(draft.evidence, draft.target, draft.comparable_groups, draft.financial_charts)
+    fallback_signals = build_signal_draft(draft.evidence, draft.target, draft.comparable_groups, draft.financial_charts, draft.objective_anomalies)
     _annotate_and_downgrade_weak_strong_signals(fallback_signals, draft.evidence)
     draft.signals = fallback_signals
     draft.next_fetch_plan = build_next_fetch_plan(draft.evidence, fallback_signals, draft.comparable_groups, draft.financial_charts)
@@ -270,6 +281,7 @@ def audit_evidence(evidence: list[EvidenceItem], target: CompanyProfile, groups:
     )
 
     transcript_ids = [index for index, item in enumerate(evidence) if item.evidence_type == "transcript"]
+    readable_transcript_ids = [index for index, item in enumerate(evidence) if item.evidence_type == "transcript" and item.quote]
     presentation_ids = [index for index, item in enumerate(evidence) if item.evidence_type == "presentation"]
     expert_memo_ids = [
         index
@@ -280,10 +292,10 @@ def audit_evidence(evidence: list[EvidenceItem], target: CompanyProfile, groups:
     findings.append(
         AuditFinding(
             topic="管理层表述与演示材料",
-            status="pass" if transcript_ids or presentation_ids else "warning",
-            finding=f"Transcript 候选 {len(transcript_ids)} 条，Presentation 候选 {len(presentation_ids)} 条；后续 AI 应重点比对措辞变化和经营分部口径。",
-            severity="info" if transcript_ids or presentation_ids else "warning",
-            related_evidence_ids=[*transcript_ids[:4], *presentation_ids[:4]],
+            status="pass" if readable_transcript_ids or presentation_ids else "warning",
+            finding=f"Transcript 候选 {len(transcript_ids)} 条，其中已抽取可读正文 {len(readable_transcript_ids)} 条；Presentation 候选 {len(presentation_ids)} 条。只有进入正文/表格层的材料才能用于生成经营信号，搜索入口只保留为资料缺口和下一步抓取计划。",
+            severity="info" if readable_transcript_ids or presentation_ids else "warning",
+            related_evidence_ids=[*readable_transcript_ids[:4], *presentation_ids[:4]],
         )
     )
     findings.append(
@@ -322,120 +334,52 @@ def audit_evidence(evidence: list[EvidenceItem], target: CompanyProfile, groups:
     return findings
 
 
-def build_signal_draft(evidence: list[EvidenceItem], target: CompanyProfile, groups: list[Any], financial_charts: list[FinancialChart] | None = None) -> list[ResearchSignal]:
-    by_type = Counter(item.evidence_type or "unknown" for item in evidence)
-    by_tier = Counter(item.confidence_tier for item in evidence)
-    target_ids = [index for index, item in enumerate(evidence) if (item.ticker or "").upper() == target.ticker.upper()]
-    transcript_ids = [index for index, item in enumerate(evidence) if item.evidence_type == "transcript"]
-    presentation_ids = [index for index, item in enumerate(evidence) if item.evidence_type == "presentation"]
-    expert_memo_ids = [index for index, item in enumerate(evidence) if item.evidence_type == "expert_memo"]
-    official_ids = [index for index, item in enumerate(evidence) if item.confidence_tier == "official"]
-    external_ids = [index for index, item in enumerate(evidence) if item.confidence_tier in {"media", "platform", "search"}]
-    charts = financial_charts or []
+def build_signal_draft(
+    evidence: list[EvidenceItem],
+    target: CompanyProfile,
+    groups: list[Any],
+    financial_charts: list[FinancialChart] | None = None,
+    objective_anomalies: list[ObjectiveAnomaly] | None = None,
+) -> list[ResearchSignal]:
+    anomalies = [anomaly for anomaly in (objective_anomalies or []) if anomaly.category != "资料缺口"]
+    signals = _signals_from_selected_anomalies(_prioritized_signal_anomalies(anomalies, target.ticker, limit=5), evidence)
+    if signals:
+        return signals[:5]
 
-    signals = [
+    official_ids = [index for index, item in enumerate(evidence) if item.confidence_tier == "official"]
+    charts = financial_charts or []
+    if charts:
+        return [
+            ResearchSignal(
+                title="已取得真实财务数据，但尚未扫描出足够显著的经营异常",
+                conclusion=f"本轮已生成 {len(charts)} 个真实财务图表，但按当前阈值尚未形成可展示的积极/风险异常。系统不会把资料数量、来源覆盖或搜索入口当作投资信号；下一步应扩大指标维度并结合业绩会正文解释。",
+                signal_type="高潜力待验证线索",
+                status="needs_validation",
+                score=SignalScore(5, 2, 3, 5, 4, 4),
+                evidence_ids=official_ids[:8],
+                chart_hint="多指标趋势图 + 横向可比图 + 证据审计附录",
+                chart_reason="没有显著异常时，展示数据底座和下一步验证路径比硬凑结论更可靠。",
+                reasoning_summary="真实财务数据是分析底座，但必须由异常扫描或正文证据触发具体企业/行业信号。",
+                reasoning_chain=["检查财务图表数量。", "过滤资料缺口类条目。", "未达异常阈值时不生成积极/风险结论。"],
+                next_validation_actions=["补充现金流、CapEx、分部收入、云业务、广告业务等更细维度。", "抓取并抽取最近 4–8 个季度 earnings call transcript 正文。"],
+            )
+        ]
+
+    return [
         ResearchSignal(
-            title="真实财务数据已进入图表层，但仍需 AI 继续挑选“最值得呈现”的异常维度",
-            conclusion=f"本轮已基于 SEC XBRL / Wind fundamentals 生成 {len(charts)} 个财务图表。它们覆盖收入、利润率/R&D 强度和可比公司横向对比；下一步应在这些真实数据上做纵向边际变化与横向背离扫描，而不是停留在证据目录。",
-            signal_type="亮点：财务数据信号",
-            status="evidence_backed" if charts else "data_gap",
-            score=SignalScore(5, 5 if charts else 1, 4, 5, 4, 5),
+            title="当前还不能形成企业经营层面的积极/风险信号",
+            conclusion="本轮尚未取得足够真实财务图表或可读业绩会正文。为避免幻觉和误导，系统只在审计区列出资料缺口，不把资料覆盖度或链接数量当作投资结论。",
+            signal_type="高潜力待验证线索",
+            status="data_gap",
+            score=SignalScore(5, 1, 3, 5, 4, 5),
             evidence_ids=official_ids[:6],
-            chart_hint="真实财务趋势图 + 可比公司横向柱状图",
-            chart_reason="折线/柱状组合可以同时呈现目标公司自身过去季度变化，以及与可比公司的同截面差异。",
-            reasoning_summary="没有真实财务数据图表时，HTML 只能算研究流程草稿；有了 SEC/Wind 财务数据后，才开始接近投资人可阅读交付物。",
-            reasoning_chain=[
-                "优先从 SEC companyfacts 拉取季度 XBRL 概念数据；非 SEC 或覆盖不足公司补充 Wind fundamentals。",
-                "对 revenue、gross profit、operating income、net income、R&D 等指标按季度归一，并保留字段来源。",
-                "派生 gross margin、operating margin、R&D/revenue，并生成目标公司趋势和可比公司横向图。",
-            ],
-            next_validation_actions=[
-                "把 SEC accession / Wind 字段升级为具体 filing 页面、表格位置和截图。",
-                "继续补充 SK Hynix、Samsung 等非 SEC 公司 IR 表格数据与本地监管公告。",
-            ],
-        ),
-        ResearchSignal(
-            title="AI 产业链景气度需要用“芯片—制造—云—基础设施”闭环验证",
-            conclusion="当前草稿已建立多组可比与交叉验证对象；最终结论不应只看目标公司单季指标，而应同时验证上游供给约束、下游 CSP 资本开支和服务器/网络/电力散热交付。",
-            signal_type="研究框架信号",
-            status="evidence_backed" if len(groups) >= 3 and len(evidence) >= 8 else "needs_validation",
-            score=SignalScore(5, min(5, 1 + len(groups)), 4, 5, 4, 4),
-            evidence_ids=target_ids[:3] + official_ids[:3],
-            chart_hint="产业链证据覆盖矩阵",
-            chart_reason="矩阵最适合展示每个产业链环节是否已有官方披露、Transcript、Presentation 和外部交叉验证。",
-            reasoning_summary="先确认哪些环节已有证据，再决定哪些指标值得深挖，避免预设指标导致遗漏真正关键变化。",
-            reasoning_chain=[
-                "将目标公司放入核心业务可比组、上游验证组、下游需求组和基础设施组。",
-                "统计每组证据类型覆盖情况，识别缺口。",
-                "只有跨组证据相互支持时，才把结论升级为强证据信号。",
-            ],
-            next_validation_actions=[
-                "为覆盖不足的可比组补抓最近 4 个季度 transcript 与 presentation。",
-                "抽取收入、毛利率、库存、CapEx、订单/backlog 与管理层措辞变化。",
-            ],
-        ),
-        ResearchSignal(
-            title="管理层措辞与专家/渠道纪要将是第一版深挖重点",
-            conclusion=f"已发现 {by_type.get('transcript', 0)} 条 transcript、{by_type.get('presentation', 0)} 条 presentation 与 {by_type.get('expert_memo', 0)} 条专家/渠道纪要候选；这些材料最适合识别需求、供给、价格、客户结构、库存和风险措辞的边际变化。",
-            signal_type="高潜力待验证线索",
-            status="needs_validation" if transcript_ids or presentation_ids or expert_memo_ids else "data_gap",
-            score=SignalScore(5, 3 if transcript_ids or presentation_ids or expert_memo_ids else 1, 5, 5, 5, 4),
-            evidence_ids=[*transcript_ids[:3], *presentation_ids[:3], *expert_memo_ids[:4]],
-            chart_hint="季度措辞热度折线 + 专家纪要主题簇 + 关键词证据抽屉",
-            chart_reason="折线适合展示同一关键词簇在连续季度中的出现强度变化，专家纪要主题簇适合捕捉官方披露之外的产业链边际线索。",
-            reasoning_summary="AI 产业链拐点往往先出现在订单、供给、客户、库存和价格的语气变化里，而不是只出现在财务表。",
-            reasoning_chain=[
-                "按季度切分管理层问答和 prepared remarks。",
-                "同步抽取微信公众号/中文平台专家交流、产业链调研和渠道调研纪要中的需求、供给、价格、库存、客户、竞争、CapEx 等关键词簇。",
-                "与可比公司同季度措辞变化横向比较，并用官方披露或上下游数据交叉验证，找出目标公司的独特变化。",
-            ],
-            next_validation_actions=[
-                "下载候选网页/PDF并转为可引用文本，微信文章优先保留网页截图和原始链接。",
-                "专家/渠道纪要只进入高潜力待验证线索，至少三方交叉验证后才升级为强结论。",
-            ],
-        ),
-        ResearchSignal(
-            title="官方披露是财务与经营数据的底座",
-            conclusion=f"当前草稿识别到 {by_tier.get('official', 0)} 条官方/监管候选证据。最终 HTML 中所有财务数据、比率和分部数据都应回链到官方文件页码或表格单元格。",
-            signal_type="证据质量信号",
-            status="evidence_backed" if official_ids else "data_gap",
-            score=SignalScore(5, min(5, by_tier.get("official", 0)), 3, 5, 3, 5),
-            evidence_ids=official_ids[:8],
-            chart_hint="财务指标纵向折线 + 可比公司横向柱状图",
-            chart_reason="折线适合显示目标公司连续季度边际变化，柱状图适合同一季度可比公司横向差异。",
-            reasoning_summary="先把官方表格数据结构化，再让 AI 挑选显著优于/弱于自身历史与可比公司的维度。",
-            reasoning_chain=[
-                "对年报、季报、20-F、10-K、10-Q 提取表格。",
-                "统一期间、币种、会计口径和分部口径。",
-                "对所有候选指标做纵向和横向异常扫描。",
-            ],
-            next_validation_actions=[
-                "对官方 PDF 执行表格抽取并记录表格页码。",
-                "把每个图表数据点绑定到文件、页码和单元格来源。",
-            ],
-        ),
-        ResearchSignal(
-            title="外部公开信息可作为事件与私有玩家交叉验证",
-            conclusion=f"当前草稿包含 {len(external_ids)} 条搜索/平台/媒体类候选证据。它们适合发现融资、ARR/收入传闻、API 价格、招聘、合作、供应商披露和突发事件，但正式强结论需要三方交叉验证。",
-            signal_type="高潜力待验证线索",
-            status="needs_validation" if external_ids else "data_gap",
-            score=SignalScore(4, 2 + min(3, len(external_ids) // 3), 5, 4, 5, 3),
-            evidence_ids=external_ids[:8],
-            chart_hint="事件时间线 + 置信度标签",
-            chart_reason="事件时间线最适合展示新闻、融资、合作、价格和人事事件如何与经营数据变化相互印证。",
-            reasoning_summary="非财务事件可能是研究 alpha 的来源，但必须清楚标注公开可验证程度。",
-            reasoning_chain=[
-                "收集主流媒体、行业平台、公司公告和供应商披露。",
-                "同一事件至少寻找三个独立来源或一个高权威源加两个弱源。",
-                "把无法充分验证但有价值的内容放入高潜力待验证区域。",
-            ],
-            next_validation_actions=[
-                "对私有模型公司补充融资、ARR、API 价格、用户增长和算力采购证据。",
-                "对网页证据生成截图并保存原始链接。",
-            ],
-        ),
+            chart_hint="证据缺口矩阵 + 下一步抓取计划",
+            chart_reason="没有正文和充分财务维度时，展示缺口比生成空泛结论更可靠。",
+            reasoning_summary="必须读取正文或结构化财务数据后，才生成企业/行业判断。",
+            reasoning_chain=["检查可读正文。", "检查财务图表。", "未达到阈值时不生成经营结论。"],
+            next_validation_actions=["优先抓取并抽取最近 4–8 个季度 earnings call transcript 正文。", "补齐 revenue、gross margin、operating margin、R&D/revenue、FCF/CapEx 等财务图表。"],
+        )
     ]
-    return signals[:5]
 
 
 def build_next_fetch_plan(evidence: list[EvidenceItem], signals: list[ResearchSignal], groups: list[Any], financial_charts: list[FinancialChart] | None = None) -> list[str]:
@@ -502,7 +446,7 @@ def _signals_from_selected_anomalies(selected_anomalies: list[ObjectiveAnomaly],
             anomaly_ids=[anomaly.anomaly_id],
             chart_hint="纵向趋势图 + 可比公司横向柱状图 + 证据抽屉",
             chart_reason="该组合能同时验证目标公司自身边际变化、可比公司的同口径差异，以及原始证据是否支持解释。",
-            reasoning_summary="该信号先由确定性数据/资料覆盖扫描产生，再由模型围绕用户勾选条目做解释和验证计划。",
+            reasoning_summary="该信号先由确定性财务数据或已读取正文触发，再由模型围绕用户勾选条目做解释和验证计划。",
             reasoning_chain=[
                 f"客观异常：{anomaly.comparison_basis}",
                 f"幅度/现象：{anomaly.magnitude or anomaly.observation}",
@@ -516,6 +460,33 @@ def _signals_from_selected_anomalies(selected_anomalies: list[ObjectiveAnomaly],
         _annotate_signal_source_count(signal, evidence)
         signals.append(signal)
     return signals
+
+
+def _prioritized_signal_anomalies(anomalies: list[ObjectiveAnomaly], target_ticker: str, limit: int) -> list[ObjectiveAnomaly]:
+    target_ticker = (target_ticker or "").upper()
+    target_related = [anomaly for anomaly in anomalies if (anomaly.ticker or "").upper() == target_ticker or anomaly.title.upper().startswith(target_ticker)]
+    selected = _balanced_anomalies(target_related, limit)
+    if len(selected) < limit:
+        text_anomalies = [anomaly for anomaly in anomalies if anomaly.category == "管理层/外部文字信号" and anomaly not in selected]
+        selected.extend(_balanced_anomalies(text_anomalies, limit - len(selected)))
+    if len(selected) < limit:
+        remaining = [anomaly for anomaly in anomalies if anomaly not in selected]
+        selected.extend(_balanced_anomalies(remaining, limit - len(selected)))
+    return selected[:limit]
+
+
+def _balanced_anomalies(anomalies: list[ObjectiveAnomaly], limit: int) -> list[ObjectiveAnomaly]:
+    positives = [anomaly for anomaly in anomalies if anomaly.polarity == "积极信号"]
+    risks = [anomaly for anomaly in anomalies if anomaly.polarity == "风险信号"]
+    balanced: list[ObjectiveAnomaly] = []
+    while len(balanced) < limit and (positives or risks):
+        if positives:
+            balanced.append(positives.pop(0))
+        if len(balanced) >= limit:
+            break
+        if risks:
+            balanced.append(risks.pop(0))
+    return balanced[:limit]
 
 
 def _ensure_signal_type_mix(signals: list[ResearchSignal], selected_anomalies: list[ObjectiveAnomaly], evidence: list[EvidenceItem]) -> list[ResearchSignal]:
@@ -575,24 +546,68 @@ def _annotate_and_downgrade_weak_strong_signals(signals: list[ResearchSignal], e
         _annotate_signal_source_count(signal, evidence)
 
 
+def _dedupe_objective_anomalies(anomalies: list[ObjectiveAnomaly]) -> list[ObjectiveAnomaly]:
+    seen: set[str] = set()
+    deduped: list[ObjectiveAnomaly] = []
+    for anomaly in anomalies:
+        if anomaly.anomaly_id in seen:
+            continue
+        seen.add(anomaly.anomaly_id)
+        deduped.append(anomaly)
+    return sorted(deduped, key=lambda item: (0 if item.polarity == "积极信号" else 1, item.category, item.title))[:40]
+
+
+def _financial_comparison_companies(target: CompanyProfile, groups: list[Any], selected_companies: list[CompanyProfile]) -> list[CompanyProfile]:
+    companies: list[CompanyProfile] = [target]
+    seen = {target.ticker.upper()}
+    core_groups = [
+        group
+        for group in groups
+        if "core" in str(group.group_id).casefold()
+        or "核心" in str(group.title)
+        or "可比" in str(group.title)
+    ]
+    for group in core_groups or groups[:1]:
+        for company in group.companies:
+            if not company.is_public:
+                continue
+            key = company.ticker.upper()
+            if key in seen:
+                continue
+            seen.add(key)
+            companies.append(company)
+    if len(companies) < 3:
+        for company in selected_companies:
+            if not company.is_public:
+                continue
+            key = company.ticker.upper()
+            if key in seen:
+                continue
+            seen.add(key)
+            companies.append(company)
+            if len(companies) >= 5:
+                break
+    return companies
+
+
 def _selected_companies(target: CompanyProfile, groups: list[Any], max_companies: int) -> list[CompanyProfile]:
     companies: list[CompanyProfile] = [target]
     seen = {target.ticker.upper()}
-    private_companies = [
-        company
-        for group in groups
-        for company in group.companies
-        if not company.is_public
-    ]
-    priority_companies = [*private_companies]
-    for company in priority_companies:
-        key = company.ticker.upper()
-        if key in seen:
-            continue
-        seen.add(key)
-        companies.append(company)
     for group in groups:
         for company in group.companies:
+            if not company.is_public:
+                continue
+            key = company.ticker.upper()
+            if key in seen:
+                continue
+            seen.add(key)
+            companies.append(company)
+            if len(companies) >= max_companies:
+                return companies
+    for group in groups:
+        for company in group.companies:
+            if company.is_public:
+                continue
             key = company.ticker.upper()
             if key in seen:
                 continue

@@ -38,6 +38,45 @@ AI_COMPANY_UNIVERSE: dict[str, CompanyProfile] = {
 
 
 TARGET_GROUP_BLUEPRINTS: dict[str, list[dict[str, object]]] = {
+    "GOOGL": [
+        {
+            "group_id": "core_digital_ads_cloud",
+            "title": "核心业务可比：数字广告 + 云/AI 平台",
+            "purpose": "对比 Alphabet 的广告商业化、云业务增长、AI 投入和经营杠杆是否优于主要平台型科技公司。",
+            "selection_logic": "选择同样拥有大规模数字广告、云/AI 平台或平台型流量商业化能力的公司；不是泛 AI 硬件可比。",
+            "tickers": ["META", "AMZN", "MSFT"],
+        },
+        {
+            "group_id": "ai_infra_cross_check",
+            "title": "交叉验证：AI 基础设施与算力供给",
+            "purpose": "用 AI 芯片、服务器和基础设施公司的收入/订单/管理层表述验证 hyperscaler AI capex 周期。",
+            "selection_logic": "这些不是 Alphabet 核心可比公司，而是验证 AI capex、算力供给和数据中心建设节奏的上下游对象。",
+            "tickers": ["NVDA", "AMD", "SMCI", "ANET", "VRT"],
+        },
+        {
+            "group_id": "private_model_watch",
+            "title": "私有模型公司观察：Gemini 竞争与模型需求",
+            "purpose": "用 OpenAI/Anthropic/xAI 的融资、API价格、模型能力和算力采购验证模型层竞争压力与算力需求。",
+            "selection_logic": "私有模型公司不是财务可比对象，但会影响 Google Gemini、云 AI 需求和资本开支叙事。",
+            "tickers": ["OPENAI", "ANTHROPIC", "XAI"],
+        },
+    ],
+    "GOOG": [
+        {
+            "group_id": "core_digital_ads_cloud",
+            "title": "核心业务可比：数字广告 + 云/AI 平台",
+            "purpose": "对比 Alphabet 的广告商业化、云业务增长、AI 投入和经营杠杆是否优于主要平台型科技公司。",
+            "selection_logic": "选择同样拥有大规模数字广告、云/AI 平台或平台型流量商业化能力的公司；不是泛 AI 硬件可比。",
+            "tickers": ["META", "AMZN", "MSFT"],
+        },
+        {
+            "group_id": "ai_infra_cross_check",
+            "title": "交叉验证：AI 基础设施与算力供给",
+            "purpose": "用 AI 芯片、服务器和基础设施公司的收入/订单/管理层表述验证 hyperscaler AI capex 周期。",
+            "selection_logic": "这些不是 Alphabet 核心可比公司，而是验证 AI capex、算力供给和数据中心建设节奏的上下游对象。",
+            "tickers": ["NVDA", "AMD", "SMCI", "ANET", "VRT"],
+        },
+    ],
     "NVDA": [
         {
             "group_id": "core_accelerator",
@@ -144,6 +183,8 @@ def recommend_comparable_groups(target_query: str, max_core_companies: int = 5) 
     target = get_company_profile(target_query)
     universe = all_research_companies()
     blueprints = TARGET_GROUP_BLUEPRINTS.get(target.ticker.upper())
+    if not blueprints and "alphabet" in target.name.casefold():
+        blueprints = TARGET_GROUP_BLUEPRINTS.get("GOOGL")
     if not blueprints:
         blueprints = _fallback_blueprints(target)
     groups: list[ComparableGroup] = []
@@ -363,7 +404,11 @@ def _company_profile_from_global_result(company: dict[str, Any], query: str) -> 
     exchange = str(company.get("exchange") or "").strip()
     country = str(company.get("country") or "").strip()
     source = str(company.get("source") or "global company search").strip()
+    ir_url = str(company.get("ir_url") or "").strip()
     aliases = tuple(str(alias).strip() for alias in (company.get("aliases") or []) if str(alias).strip())
+    if "alphabet" in name.casefold() and ticker in {"GOOG", "GOOGL"}:
+        ticker = "GOOGL"
+        ir_url = ir_url or "https://abc.xyz/investor/"
     return CompanyProfile(
         ticker=ticker,
         name=name,
@@ -372,7 +417,7 @@ def _company_profile_from_global_result(company: dict[str, Any], query: str) -> 
         segment=_segment_hint(company),
         description=_global_company_description(company),
         cik=str(company.get("cik") or "").strip(),
-        ir_url=str(company.get("ir_url") or "").strip(),
+        ir_url=ir_url,
         is_public=True,
         source_hint=source,
         local_code=local_code,

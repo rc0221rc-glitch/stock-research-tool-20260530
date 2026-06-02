@@ -23,6 +23,9 @@ def validate_research_draft(draft: ResearchDraft) -> ValidationReport:
         _check_deep_research_runtime(draft),
         _check_multi_model_attempts(draft),
         _check_two_stage_anomaly_workflow(draft),
+        _check_no_coverage_as_signal(draft),
+        _check_no_evidence_gap_in_signal_list(draft),
+        _check_readable_text_for_text_signals(draft),
         _check_financial_charts(draft),
         _check_peer_comparables(draft),
         _check_source_traceability(draft),
@@ -177,6 +180,51 @@ def _check_two_stage_anomaly_workflow(draft: ResearchDraft) -> ValidationCheck:
         f"客观异常 {len(draft.objective_anomalies)} 条；积极 {positive_count} 条；风险 {risk_count} 条；已勾选 {selected_count} 条。",
         "至少形成积极/风险分类的客观异常清单；第二阶段记录 selected_for_deep_dive。",
         "完善横纵向异常扫描器，并在 Streamlit 中提供勾选入口。",
+    )
+
+
+def _check_no_coverage_as_signal(draft: ResearchDraft) -> ValidationCheck:
+    forbidden = ["资料覆盖", "来源覆盖", "监管来源覆盖", "transcript 候选", "候选证据较多", "搜索入口", "资源丰富"]
+    signal_text = " ".join(f"{signal.title} {signal.conclusion} {signal.signal_type}" for signal in draft.signals)
+    anomaly_text = " ".join(f"{anomaly.title} {anomaly.category} {anomaly.observation}" for anomaly in draft.objective_anomalies if anomaly.polarity == POSITIVE)
+    offenders = [token for token in forbidden if token in signal_text or token in anomaly_text]
+    return _check(
+        "no_coverage_as_signal",
+        "投资信号纯度",
+        "积极/风险信号必须来自经营、财务、行业或管理层表述分析，不能把资料覆盖充分或来源数量本身当作积极信号。",
+        not offenders,
+        f"命中禁用覆盖型表达：{', '.join(offenders) or '无'}。",
+        "信号层不得包含资料覆盖/来源覆盖/搜索入口数量作为积极信号；这些只能放入证据审计或资料缺口。",
+        "把覆盖类条目移入 audit_findings，并只保留财务异常、正文主题异常和真实经营/行业信号。",
+    )
+
+
+def _check_readable_text_for_text_signals(draft: ResearchDraft) -> ValidationCheck:
+    readable = [item for item in draft.evidence if item.evidence_type in {"transcript", "presentation", "expert_memo", "external_signal"} and item.quote]
+    text_anomalies = [anomaly for anomaly in draft.objective_anomalies if anomaly.category == "管理层/外部文字信号"]
+    text_signals = [signal for signal in draft.signals if any(token in f"{signal.title} {signal.conclusion}" for token in ["管理层", "措辞", "transcript", "正文", "业绩会"])]
+    ok = bool(readable) or not text_anomalies and not text_signals
+    return _check(
+        "readable_text_for_text_signals",
+        "正文读取",
+        "管理层措辞、业绩会纪要和外部文字信号必须基于已抽取正文 quote，不能基于候选链接或搜索入口。",
+        ok,
+        f"可读正文证据 {len(readable)} 条；文字异常 {len(text_anomalies)} 条；文字信号 {len(text_signals)} 条。",
+        "若生成文字信号，至少需要 1 条 transcript/presentation/external quote；正式版应覆盖多个季度和可比公司。",
+        "增强 transcript/presentation 正文抓取；抓不到正文时只输出资料缺口和下一步抓取计划。",
+    )
+
+
+def _check_no_evidence_gap_in_signal_list(draft: ResearchDraft) -> ValidationCheck:
+    gap_anomalies = [anomaly for anomaly in draft.objective_anomalies if anomaly.category == "资料缺口"]
+    return _check(
+        "no_evidence_gap_in_signal_list",
+        "异常清单纯度",
+        "第一阶段积极/风险异常清单只能放企业经营、财务、行业或正文主题异常；资料缺口应放入证据审计附录。",
+        not gap_anomalies,
+        f"主异常清单中的资料缺口条目 {len(gap_anomalies)} 条；附录缺口 {len((draft.run_metadata or {}).get('evidence_gap_anomalies', []))} 条。",
+        "资料缺口不应出现在用户勾选的积极/风险异常列表中。",
+        "把资料缺口类异常移入 run_metadata.evidence_gap_anomalies 或 audit_findings。",
     )
 
 

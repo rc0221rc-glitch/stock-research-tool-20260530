@@ -321,7 +321,7 @@ def render_anomaly_selector(user_id: str, deepseek_api_key: str) -> None:
 
     positive = [item for item in anomalies if item.polarity == POSITIVE]
     risk = [item for item in anomalies if item.polarity == RISK]
-    st.caption("这些条目来自纯客观扫描：财务图表横纵向变化、可比公司排名、资料覆盖缺口/优势。你勾选后，大模型只围绕被选条目做深度分析。")
+    st.caption("这些条目来自纯客观扫描：财务图表横纵向变化、可比公司排名、已读取正文主题命中。资料缺口只进入证据审计，不作为积极/风险信号。你勾选后，大模型只围绕被选条目做深度分析。")
     col_pos, col_risk, col_selected = st.columns(3)
     col_pos.metric("积极信号", len(positive))
     col_risk.metric("风险信号", len(risk))

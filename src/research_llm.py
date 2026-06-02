@@ -391,6 +391,11 @@ def _build_payload(
             "输出语言必须是中文，标题、结论、推理摘要、下一步验证动作都用中文。",
             "每个深度分析信号必须对应至少一个 selected_anomalies 中的 anomaly_id。",
             "积极信号和风险信号要分清楚；证据不足时标为 needs_validation。",
+            "禁止把资料覆盖充分、监管来源较多、transcript 候选较多、搜索入口较多本身写成积极信号；这些只能放在证据审计或资料缺口里。",
+            "积极/风险信号必须是关于公司经营、行业景气、竞争格局、财务质量、资本开支、利润率、客户/地区/业务结构、管理层判断变化的具体结论。",
+            "如果没有读到 transcript/presentation 正文或没有足够财务图表，不要编造经营结论；输出 data_gap 或 needs_validation。",
+            "深度分析必须至少使用一个 financial_charts 中的具体数据点或一个 evidence.quote 原文片段；不能只复述异常标题。",
+            "涉及管理层观点、需求、竞争、云/AI 投入、广告商业化等文字判断时，必须引用 has_readable_text=true 的 evidence。",
             "Each signal must reference evidence_ids and explain chart choice.",
             "Do not claim unsupported facts. Use needs_validation for hypotheses.",
             "Prefer signals that combine vertical company trend and horizontal peer/cross-chain comparison.",
@@ -490,6 +495,8 @@ def _evidence_summary(index: int, item: EvidenceItem) -> dict[str, Any]:
         "date": item.date,
         "title": item.title[:220],
         "url": item.url,
+        "quote": item.quote[:900],
+        "has_readable_text": bool(item.quote),
     }
 
 
@@ -512,6 +519,7 @@ def _select_prompt_evidence(evidence: list[EvidenceItem], limit: int) -> list[tu
     selected = sorted(
         indexed,
         key=lambda pair: (
+            0 if pair[1].quote else 1,
             0 if pair[1].screenshot_path else 1,
             type_priority.get(pair[1].evidence_type, 8),
             priority.get(pair[1].confidence_tier, 9),
@@ -634,6 +642,9 @@ def _signal_contract_status(signals: list[ResearchSignal]) -> tuple[bool, str]:
     if len(signals) < 5 or len(signals) > 8:
         return False, f"signal_count={len(signals)}"
     text = " ".join(f"{signal.signal_type} {signal.status} {signal.title} {signal.conclusion}" for signal in signals).lower()
+    forbidden = ["资料覆盖", "来源覆盖", "监管来源覆盖", "transcript 候选", "候选证据", "搜索入口", "coverage"]
+    if any(token in text for token in forbidden):
+        return False, "contains_evidence_coverage_as_signal"
     has_positive = any(token in text for token in ["亮点", "positive", "highlight", "growth", "领先", "优势"])
     has_risk = any(token in text for token in ["风险", "risk", "decline", "pressure", "erosion", "underinvestment"])
     has_validation = any(token in text for token in ["待验证", "needs_validation", "hypothesis", "验证", "线索"])

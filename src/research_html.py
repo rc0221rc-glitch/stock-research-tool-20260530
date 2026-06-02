@@ -385,7 +385,7 @@ def _objective_anomalies_section(draft: ResearchDraft, compact: bool) -> str:
         <div>
           <p class="eyebrow">客观异常扫描</p>
           <h2>第一阶段客观异常清单</h2>
-          <p>这些条目来自数据、文字资料覆盖、横向/纵向对比；用户勾选后才进入大模型深度分析。</p>
+          <p>这些条目只来自真实财务数据、已读取正文主题命中、横向/纵向对比；资料缺口只放在审计附录，不进入积极/风险信号。</p>
         </div>
       </div>
       <div class="anomaly-columns">
