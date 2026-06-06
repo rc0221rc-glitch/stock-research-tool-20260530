@@ -165,14 +165,15 @@ def _check_financial_charts(draft: ResearchDraft) -> ValidationCheck:
     available_required = [chart for chart in draft.financial_charts if chart.chart_id in required_ids and chart.data_status == "available"]
     partial_required = [chart for chart in draft.financial_charts if chart.chart_id in required_ids and chart.data_status == "partial"]
     missing_required = [chart for chart in draft.financial_charts if chart.chart_id in required_ids and chart.data_status == "missing"]
+    data_backed_required = available_required + partial_required
     return _check(
         "financial_charts",
         "财务图表",
         "每份交付物必须固定包含 13 张目标公司与可比公司财务/经营图表；无可审计数据时只能显示缺口，不能伪造。",
-        not missing_ids and len(draft.financial_charts) >= MIN_FINANCIAL_CHARTS,
+        not missing_ids and len(draft.financial_charts) >= MIN_FINANCIAL_CHARTS and bool(data_backed_required),
         f"固定图表 present={len(required_ids) - len(missing_ids)}/{len(required_ids)}；available={len(available_required)}；partial={len(partial_required)}；missing_data={len(missing_required)}；缺少规格={', '.join(missing_ids) or '无'}。",
-        "13 个固定 chart_id 均应存在，并明确标记 available/partial/missing。",
-        "继续补分部收入/分部毛利率、EBITDA、CapEx、现金流等结构化数据源，提高固定图表 available 比例。",
+        "13 个固定 chart_id 均应存在，并且至少一部分必须有真实可审计数据点；全为空时不得视为通过。",
+        "先修复目标公司识别与 SEC/Wind/巨潮数据抓取，再继续补分部收入/分部毛利率、EBITDA 等结构化数据源。",
     )
 
 

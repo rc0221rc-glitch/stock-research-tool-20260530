@@ -97,15 +97,16 @@ def render_memo_html(draft: ResearchDraft) -> str:
 
 def render_dashboard_html(draft: ResearchDraft) -> str:
     company_lookup = _draft_display_lookup(draft)
+    chart_stats = _chart_stats(draft)
     content = f"""
-    <main class="dashboard-shell">
+      <main class="dashboard-shell">
       {_hero(draft, "交互式研究看板草稿", "信号卡片、证据矩阵、可比组与审计附录版本。点击信号或证据可打开右侧来源抽屉。")}
       {_validation_section(draft)}
       {_model_runs_section(draft)}
       <section class="grid-3">
         {_metric_tile("候选证据", str(len(draft.evidence)), "所有图表与文字结论必须绑定来源")}
         {_metric_tile("核心信号草稿", str(len(draft.signals)), "含亮点、风险和待验证假设")}
-        {_metric_tile("真实财务图表", str(len(draft.financial_charts)), "基于 SEC XBRL / Wind 数据点")}
+        {_metric_tile("含真实数据图表", str(chart_stats["with_points"]), f"固定图表缺数据 {chart_stats['missing_required']} 张")}
       </section>
       {_financial_charts_section(draft, compact=False)}
       {_objective_anomalies_section(draft, compact=False)}
@@ -253,6 +254,19 @@ def _draft_display_lookup(draft: ResearchDraft | dict[str, Any]) -> dict[str, st
     return display_name_lookup(companies)
 
 
+def _chart_stats(draft: ResearchDraft | dict[str, Any]) -> dict[str, int]:
+    charts = list(_draft_attr(draft, "financial_charts", []) or [])
+    return {
+        "total": len(charts),
+        "with_points": sum(1 for chart in charts if _item_attr(chart, "points", [])),
+        "missing_required": sum(
+            1
+            for chart in charts
+            if _item_attr(chart, "required", False) and _item_attr(chart, "data_status", "") == "missing"
+        ),
+    }
+
+
 def _chart_payload(chart: FinancialChart) -> dict[str, Any]:
     data = chart.to_dict()
     for point in data.get("points", []):
@@ -393,6 +407,15 @@ def _financial_charts_section(draft: ResearchDraft, compact: bool) -> str:
           </div>
         </section>
         """
+    available_count = sum(1 for chart in draft.financial_charts if chart.points)
+    missing_required_count = sum(1 for chart in draft.financial_charts if chart.required and chart.data_status == "missing")
+    heading = "真实财务数据图表" if available_count else "财务图表缺口诊断"
+    description = (
+        f"已生成 {len(draft.financial_charts)} 张图表规格，其中 {available_count} 张含真实可审计数据点，"
+        f"{missing_required_count} 张固定图表仍缺结构化数据。缺数据时只显示缺口和下一步补抓方向，不用估算值或同行数据兜底。"
+        if missing_required_count or not available_count
+        else "这些图表不是占位符：数据来自 SEC XBRL companyfacts 或万得 Wind fundamentals，并保留原始 filing accession / Wind 字段来源。"
+    )
     chart_items = list(enumerate(draft.financial_charts))
     if compact:
         required_items = [(index, chart) for index, chart in chart_items if chart.required]
@@ -405,8 +428,8 @@ def _financial_charts_section(draft: ResearchDraft, compact: bool) -> str:
       <div class="section-title">
         <div>
           <p class="eyebrow">财务图表</p>
-          <h2>真实财务数据图表</h2>
-          <p>这些图表不是占位符：数据来自 SEC XBRL companyfacts 或万得 Wind fundamentals，并保留原始 filing accession / Wind 字段来源。</p>
+          <h2>{_e(heading)}</h2>
+          <p>{_e(description)}</p>
         </div>
       </div>
       <div class="chart-grid {'compact' if compact else ''}">
@@ -490,6 +513,7 @@ def _chart_card(chart: FinancialChart, chart_index: int) -> str:
       {status}
       {chart_html}
       <p class="chart-insight">{_e(chart.insight)}</p>
+      {_expected_companies_html(chart)}
       {f'<p class="missing-reason">{_e(chart.missing_reason)}</p>' if chart.missing_reason else ''}
       <p class="source-note">{_e(chart.source_note)}</p>
     </article>
@@ -507,10 +531,23 @@ def _chart_status_badge(chart: FinancialChart) -> str:
     return f"<div class='chart-status {chart.data_status}'>{_e(labels.get(chart.data_status, '固定图表'))}</div>"
 
 
+def _expected_companies_html(chart: FinancialChart) -> str:
+    if chart.data_status != "missing" or not chart.expected_companies:
+        return ""
+    chips = "".join(f"<span>{_e(company)}</span>" for company in chart.expected_companies[:10])
+    more = "" if len(chart.expected_companies) <= 10 else f"<small>另有 {len(chart.expected_companies) - 10} 家</small>"
+    return f"""
+    <div class="expected-companies">
+      <strong>应覆盖公司</strong>
+      <div>{chips}{more}</div>
+    </div>
+    """
+
+
 def _bar_chart(chart: FinancialChart, chart_index: int) -> str:
     points = chart.points
     if not points:
-        return "<div class='empty-chart'>No data</div>"
+        return _missing_chart_html(chart)
     values = [max(0.0, point.value) for point in points]
     max_value = max(values) or 1
     bars = []
@@ -654,7 +691,7 @@ def _missing_chart_html(chart: FinancialChart) -> str:
 def _line_chart(chart: FinancialChart, chart_index: int) -> str:
     points = chart.points
     if not points:
-        return "<div class='empty-chart'>No data</div>"
+        return _missing_chart_html(chart)
     values = [point.value for point in points]
     min_value, max_value = min(values), max(values)
     span = max(max_value - min_value, 1)
@@ -1073,7 +1110,7 @@ def _style() -> str:
     .anomaly-ref{align-items:center;margin:8px 0}.anomaly-ref strong{font-size:12px;color:var(--muted)}.anomaly-ref span{max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
     .chart-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px}.chart-grid.compact{grid-template-columns:1fr}.chart-card{padding:18px;overflow:hidden}.chart-head{display:flex;justify-content:space-between;gap:16px;align-items:start}.chart-head h3{margin:0 0 6px;font-size:20px}.chart-head p,.source-note{color:var(--muted);font-size:13px;margin:0}.chart-head span{white-space:nowrap;background:#eef6ff;color:#2442a8;border-radius:999px;padding:6px 10px;font-size:12px;font-weight:800}.chart-insight{font-weight:800;color:#203047}.empty-state{padding:22px}.empty-chart{height:220px;display:grid;place-items:center;color:var(--muted)}
     .chart-status{display:inline-flex;margin:10px 0 4px;border-radius:999px;padding:5px 10px;font-size:12px;font-weight:800;background:#ecfdf3;color:var(--green)}.chart-status.partial{background:#fff7ed;color:var(--orange)}.chart-status.missing{background:#fff1f0;color:var(--red)}.missing-reason{color:var(--orange);font-weight:800}.missing-chart{border:1px dashed #f59e0b;border-radius:16px;background:#fffbeb;padding:18px;text-align:center}.missing-chart strong{display:block;color:#92400e}.missing-chart p{max-width:720px;margin:8px auto;color:#92400e}
-    .small-multiples-missing{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin:14px 0}.small-multiple-missing{border:1px dashed #f59e0b;background:#fffbeb;border-radius:16px;padding:14px}.small-multiple-missing strong{display:block;color:#203047}.small-multiple-missing span{display:inline-flex;margin:7px 0;border-radius:999px;background:#fff7ed;color:#92400e;padding:4px 8px;font-size:12px;font-weight:800}.small-multiple-missing p{margin:0;color:#92400e;font-size:12px}
+    .expected-companies{border:1px solid #fde68a;background:#fffbeb;border-radius:14px;padding:10px 12px;margin:12px 0}.expected-companies strong{display:block;color:#92400e;font-size:12px;margin-bottom:7px}.expected-companies div{display:flex;gap:6px;flex-wrap:wrap}.expected-companies span,.expected-companies small{border-radius:999px;background:#fff7ed;color:#92400e;padding:4px 8px;font-size:12px;font-weight:800}.small-multiples-missing{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin:14px 0}.small-multiple-missing{border:1px dashed #f59e0b;background:#fffbeb;border-radius:16px;padding:14px}.small-multiple-missing strong{display:block;color:#203047}.small-multiple-missing span{display:inline-flex;margin:7px 0;border-radius:999px;background:#fff7ed;color:#92400e;padding:4px 8px;font-size:12px;font-weight:800}.small-multiple-missing p{margin:0;color:#92400e;font-size:12px}
     .chart-legend{display:flex;gap:10px;flex-wrap:wrap;margin:12px 0}.legend-item{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--muted);font-weight:800}.legend-item i{width:11px;height:11px;border-radius:999px;background:var(--blue)}.c1 i,.cluster-bar.c1,.trend.c1,.multi-dot.c1{--series:#0e9fbc}.c2 i,.cluster-bar.c2,.trend.c2,.multi-dot.c2{--series:#11845b}.c3 i,.cluster-bar.c3,.trend.c3,.multi-dot.c3{--series:#b45309}.c4 i,.cluster-bar.c4,.trend.c4,.multi-dot.c4{--series:#7c3aed}.c5 i,.cluster-bar.c5,.trend.c5,.multi-dot.c5{--series:#db2777}.c6 i,.cluster-bar.c6,.trend.c6,.multi-dot.c6{--series:#475569}.c7 i,.cluster-bar.c7,.trend.c7,.multi-dot.c7{--series:#dc2626}.legend-item.c0 i,.cluster-bar.c0,.trend.c0,.multi-dot.c0{--series:var(--blue)}.legend-item.c1 i{background:#0e9fbc}.legend-item.c2 i{background:#11845b}.legend-item.c3 i{background:#b45309}.legend-item.c4 i{background:#7c3aed}.legend-item.c5 i{background:#db2777}.legend-item.c6 i{background:#475569}.legend-item.c7 i{background:#dc2626}
     .clustered-chart{height:310px;display:flex;gap:16px;align-items:end;padding:22px 4px 12px;border-bottom:1px solid var(--line);overflow-x:auto}.cluster-group{min-width:110px;flex:1;display:flex;flex-direction:column;gap:8px;align-items:center}.cluster-bars{height:230px;width:100%;display:flex;gap:4px;align-items:end;justify-content:center}.cluster-bar{position:relative;border:0;border-radius:8px 8px 3px 3px;background:var(--series,var(--blue));min-width:13px;flex:1;max-width:28px;cursor:pointer;box-shadow:0 8px 18px rgba(16,32,51,.14)}.cluster-bar span{display:none;position:absolute;bottom:calc(100% + 6px);left:50%;transform:translateX(-50%);white-space:nowrap;background:#102033;color:#fff;border-radius:9px;padding:4px 7px;font-size:11px}.cluster-bar:hover span{display:block}.cluster-group em{font-style:normal;font-size:11px;color:var(--muted);text-align:center}.cluster-missing{display:block;align-self:end;min-width:13px;flex:1;max-width:28px;height:8px;border-radius:6px;background:#e2e8f0}
     .multi-line-chart{height:330px;position:relative;overflow-x:auto}.multi-line-chart svg{min-width:760px;width:100%;height:290px;display:block}.trend.multi{fill:none;stroke:var(--series,var(--blue));stroke-width:3.5;stroke-linecap:round;stroke-linejoin:round}.multi-dot{position:absolute;transform:translate(-50%,-50%);width:16px;height:16px;border-radius:999px;border:3px solid #fff;background:var(--series,var(--blue));box-shadow:0 4px 12px rgba(16,32,51,.28);cursor:pointer}.multi-dot span{position:absolute;left:50%;bottom:18px;transform:translateX(-50%);white-space:nowrap;background:#102033;color:#fff;border-radius:9px;padding:4px 7px;font-size:11px;opacity:0;pointer-events:none}.multi-dot:hover span{opacity:1}

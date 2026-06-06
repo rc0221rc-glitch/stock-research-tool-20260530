@@ -12,7 +12,17 @@ AI_COMPANY_UNIVERSE: dict[str, CompanyProfile] = {
     "NVDA": CompanyProfile("NVDA", "NVIDIA", "US", "AI accelerator leader", "GPU / AI accelerator", "AI training and inference GPU, networking, CUDA ecosystem", "0001045810", "https://investor.nvidia.com/"),
     "AMD": CompanyProfile("AMD", "Advanced Micro Devices", "US", "AI accelerator challenger", "GPU / AI accelerator", "Data center GPU, CPU and adaptive computing", "0000002488", "https://ir.amd.com/"),
     "AVGO": CompanyProfile("AVGO", "Broadcom", "US", "custom silicon and networking", "ASIC / networking", "AI custom silicon, switching, connectivity and software", "0001730168", "https://investors.broadcom.com/"),
-    "MRVL": CompanyProfile("MRVL", "Marvell Technology", "US", "data infrastructure silicon", "ASIC / networking", "Custom silicon, optical DSP and data infrastructure chips", "0001835632", "https://investor.marvell.com/"),
+    "MRVL": CompanyProfile(
+        "MRVL",
+        "Marvell Technology",
+        "US",
+        "data infrastructure silicon",
+        "ASIC / networking",
+        "Custom silicon, optical DSP and data infrastructure chips",
+        "0001835632",
+        "https://investor.marvell.com/",
+        aliases=("Marvell Technology Inc", "Marvell Technology, Inc.", "9MW", "9MW.MU", "9MW.DU", "9MW.F", "9MW.DE"),
+    ),
     "ARM": CompanyProfile("ARM", "Arm Holdings", "US", "CPU IP platform", "CPU IP", "CPU architecture IP used in cloud, mobile and edge AI", "0001973239", "https://investors.arm.com/"),
     "TSM": CompanyProfile("TSM", "Taiwan Semiconductor Manufacturing", "US ADR / Taiwan", "leading foundry", "advanced foundry", "Advanced-node wafer manufacturing and CoWoS packaging", "0001046179", "https://investor.tsmc.com/"),
     "ASML": CompanyProfile("ASML", "ASML Holding", "US ADR / Netherlands", "lithography bottleneck", "semiconductor equipment", "EUV and DUV lithography systems", "0000937966", "https://www.asml.com/en/investors"),
@@ -165,7 +175,9 @@ def get_company_profile(query: str) -> CompanyProfile:
     if ticker in EXTRA_COMPANIES:
         return EXTRA_COMPANIES[ticker]
     for company in [*AI_COMPANY_UNIVERSE.values(), *EXTRA_COMPANIES.values()]:
-        if query.casefold() in {company.name.casefold(), company.ticker.casefold()}:
+        query_key = query.casefold().strip()
+        alias_keys = {str(alias).casefold().strip() for alias in company.aliases}
+        if query_key in {company.name.casefold(), company.ticker.casefold(), *alias_keys}:
             return company
     discovered = _discover_global_company(query)
     if discovered:
@@ -293,6 +305,8 @@ def _company_identity_keys(company: CompanyProfile) -> set[str]:
             normalize_ticker(company.ticker),
             normalize_ticker(company.local_code),
             company.name.casefold().strip(),
+            *(normalize_ticker(alias) for alias in company.aliases),
+            *(str(alias).casefold().strip() for alias in company.aliases),
         ]
         if key
     }
@@ -320,6 +334,9 @@ def _profile_from_llm_company(raw_company: Any) -> CompanyProfile | None:
     ticker = str(raw_company.get("ticker") or "").strip().upper()
     local_code = str(raw_company.get("local_code") or "").strip()
     market = str(raw_company.get("market") or "Global").strip()
+    known = _known_primary_profile({name, ticker, local_code, *(raw_company.get("aliases") or [])})
+    if known:
+        return _merge_llm_company_metadata(known, raw_company)
     found = _best_global_match(ticker or local_code or name, raw_company)
     if found:
         profile = _company_profile_from_global_result(found, ticker or local_code or name)
@@ -339,13 +356,27 @@ def _profile_from_llm_company(raw_company: Any) -> CompanyProfile | None:
 
 
 def _best_global_match(query: str, raw_company: dict[str, Any]) -> dict[str, Any] | None:
-    query = (query or "").strip()
-    if not query:
+    queries = [
+        str(value).strip()
+        for value in [
+            query,
+            raw_company.get("ticker"),
+            raw_company.get("local_code"),
+            raw_company.get("name"),
+        ]
+        if str(value or "").strip()
+    ]
+    queries = list(dict.fromkeys(queries))
+    if not queries:
         return None
-    try:
-        results = search_companies(query, limit=6)
-    except Exception:
-        results = []
+    results: list[dict[str, Any]] = []
+    for candidate_query in queries:
+        try:
+            results = search_companies(candidate_query, limit=6)
+        except Exception:
+            results = []
+        if results:
+            break
     if not results:
         return None
     raw_name = str(raw_company.get("name") or "").casefold()
@@ -410,6 +441,57 @@ def _company_profile_from_global_result(company: dict[str, Any], query: str) -> 
     if "alphabet" in name.casefold() and ticker in {"GOOG", "GOOGL"}:
         ticker = "GOOGL"
         ir_url = ir_url or "https://abc.xyz/investor/"
+    primary_profile = _known_primary_profile(
+        {
+            ticker,
+            local_code,
+            name,
+            query,
+            *aliases,
+        }
+    )
+    if primary_profile:
+        merged_aliases = tuple(
+            dict.fromkeys(
+                [
+                    *primary_profile.aliases,
+                    ticker,
+                    local_code,
+                    name,
+                    query,
+                    *aliases,
+                ]
+            )
+        )
+        return replace(
+            primary_profile,
+            source_hint=(primary_profile.source_hint or source or "global company search"),
+            local_code=primary_profile.local_code or local_code,
+            exchange=primary_profile.exchange or exchange,
+            country=primary_profile.country or country,
+            aliases=tuple(alias for alias in merged_aliases if alias),
+        )
+    if not str(company.get("cik") or "").strip():
+        sec_primary = _sec_primary_result_for_name(name)
+        if sec_primary:
+            merged_aliases = tuple(
+                dict.fromkeys(
+                    [
+                        ticker,
+                        local_code,
+                        name,
+                        query,
+                        *aliases,
+                        *(sec_primary.get("aliases") or []),
+                    ]
+                )
+            )
+            sec_profile = _company_profile_from_global_result({**sec_primary, "aliases": merged_aliases}, name)
+            return replace(
+                sec_profile,
+                source_hint=f"{source} + SEC primary listing match",
+                aliases=tuple(alias for alias in merged_aliases if alias),
+            )
     return CompanyProfile(
         ticker=ticker,
         name=name,
@@ -426,6 +508,37 @@ def _company_profile_from_global_result(company: dict[str, Any], query: str) -> 
         country=country,
         aliases=aliases,
     )
+
+
+def _known_primary_profile(candidates: set[str]) -> CompanyProfile | None:
+    normalized_candidates = {
+        value
+        for candidate in candidates
+        for value in {normalize_ticker(str(candidate)), str(candidate).casefold().strip()}
+        if value
+    }
+    for company in [*AI_COMPANY_UNIVERSE.values(), *EXTRA_COMPANIES.values()]:
+        if normalized_candidates & _company_identity_keys(company):
+            return company
+    return None
+
+
+def _sec_primary_result_for_name(name: str) -> dict[str, Any] | None:
+    normalized_name = name.casefold().replace(",", "").replace(".", "").strip()
+    if not normalized_name or len(normalized_name) < 6:
+        return None
+    try:
+        results = search_companies(name, limit=8)
+    except Exception:
+        return None
+    for result in results:
+        if not str(result.get("cik") or "").strip():
+            continue
+        result_name = str(result.get("name_en") or result.get("name") or "").casefold().replace(",", "").replace(".", "").strip()
+        score = float(result.get("match_score") or 0)
+        if result_name == normalized_name or score >= 0.93:
+            return result
+    return None
 
 
 def _segment_hint(company: dict[str, Any]) -> str:

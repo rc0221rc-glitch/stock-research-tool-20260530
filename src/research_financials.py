@@ -309,6 +309,7 @@ def _required_metric_chart(
         required=True,
         data_status=status,
         missing_reason=missing_reason or _partial_missing_reason(points, companies, quarter_count),
+        expected_companies=[company_display_name(company) for company in companies],
     )
 
 

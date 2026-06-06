@@ -253,10 +253,11 @@ def render_draft_review(user_id: str, llm_config: Any) -> None:
 
     st.subheader("4. 选择需要深挖的客观异常")
     st.warning(draft.report_label)
+    chart_stats = _financial_chart_stats(draft)
     summary_cols = st.columns(4)
     summary_cols[0].metric("候选证据", len(draft.evidence))
     summary_cols[1].metric("客观异常", len(draft.objective_anomalies))
-    summary_cols[2].metric("真实财务图表", len(draft.financial_charts))
+    summary_cols[2].metric("含真实数据图表", chart_stats["with_points"], delta=f"缺 {chart_stats['missing_required']} 张固定图表")
     summary_cols[3].metric("审计项", len(draft.audit_findings))
 
     render_anomaly_selector(user_id, llm_config)
@@ -280,11 +281,17 @@ def render_draft_review(user_id: str, llm_config: Any) -> None:
     with tab_charts:
         if not draft.financial_charts:
             st.warning("本轮没有生成真实财务图表。可能是 SEC / Wind / 巨潮 PDF 表格暂时不可用，或目标公司披露格式需要继续适配。")
+        elif chart_stats["with_points"] == 0:
+            st.error("本轮 13 张固定图表均没有真实数据点。请先修复目标公司识别、SEC/Wind/巨潮数据抓取或可比公司代码映射，再把 HTML 发给内测用户。")
+        elif chart_stats["missing_required"]:
+            st.warning(f"已有 {chart_stats['with_points']} 张图含真实数据点，但仍有 {chart_stats['missing_required']} 张固定图表缺数据。")
         for chart in draft.financial_charts:
             with st.container(border=True):
                 st.markdown(f"### {chart.title}")
-                st.caption(f"{chart.chart_type} · {chart.y_axis}")
+                st.caption(f"{chart.chart_type} · {chart.y_axis} · {chart.data_status}")
                 st.write(chart.insight)
+                if chart.missing_reason:
+                    st.warning(chart.missing_reason)
                 rows = []
                 for point in chart.points:
                     rows.append(
@@ -342,19 +349,25 @@ def render_draft_review(user_id: str, llm_config: Any) -> None:
 
     st.subheader("6. 你确认后生成 HTML")
     passed_final = bool(draft.validation_report and draft.validation_report.status == "PASS_FINAL_DELIVERABLE")
+    deep_analysis_ready = _has_successful_deep_analysis(draft)
     if not passed_final:
         st.error("自动验收未通过：只能生成“内测草稿 HTML”，不能标记为最终交付物。")
+    if not deep_analysis_ready:
+        st.error("尚未完成第二阶段深度分析：请先勾选积极/风险异常，并成功调用大模型生成深度信号；第一阶段客观扫描结果不再允许下载成研究交付物。")
+    if chart_stats["with_points"] == 0:
+        st.error("禁止误导：当前财务图表全部为空。请先修复目标公司识别或数据抓取；页面内可查看缺口诊断，但不再允许下载成研究交付物。")
     confirmed = st.checkbox("我理解这只是内测草稿，不是专业最终交付物，仍要生成 HTML", value=False)
+    can_generate_html = confirmed and deep_analysis_ready and chart_stats["with_points"] > 0
     col_memo, col_dashboard = st.columns(2)
     with col_memo:
-        if st.button("生成投资备忘录草稿 HTML（非最终）", disabled=not confirmed, use_container_width=True):
+        if st.button("生成投资备忘录草稿 HTML（非最终）", disabled=not can_generate_html, use_container_width=True):
             path = save_memo_html(draft)
             st.session_state.memo_path = str(path)
             report = store_report_metadata(_job_id(), user_id, "memo", str(path), draft)
             log_research_event(user_id, "memo_html_generated", report_id=report["id"], metadata={"path": str(path)})
             st.success(f"已生成：{path}")
     with col_dashboard:
-        if st.button("生成交互看板草稿 HTML（非最终）", disabled=not confirmed, use_container_width=True):
+        if st.button("生成交互看板草稿 HTML（非最终）", disabled=not can_generate_html, use_container_width=True):
             path = save_dashboard_html(draft)
             st.session_state.dashboard_path = str(path)
             report = store_report_metadata(_job_id(), user_id, "dashboard", str(path), draft)
@@ -445,6 +458,29 @@ def _render_static_table(rows: list[dict[str, Any]], max_rows: int = 80) -> None
     )
     if len(rows) > max_rows:
         st.caption(f"已显示前 {max_rows} 行，共 {len(rows)} 行；完整内容会进入 HTML 报告和下载文件。")
+
+
+def _financial_chart_stats(draft: Any) -> dict[str, int]:
+    charts = list(getattr(draft, "financial_charts", []) or [])
+    return {
+        "total": len(charts),
+        "with_points": sum(1 for chart in charts if getattr(chart, "points", None)),
+        "available_required": sum(1 for chart in charts if getattr(chart, "required", False) and getattr(chart, "data_status", "") == "available"),
+        "partial_required": sum(1 for chart in charts if getattr(chart, "required", False) and getattr(chart, "data_status", "") == "partial"),
+        "missing_required": sum(1 for chart in charts if getattr(chart, "required", False) and getattr(chart, "data_status", "") == "missing"),
+    }
+
+
+def _has_successful_deep_analysis(draft: Any) -> bool:
+    metadata = getattr(draft, "run_metadata", {}) or {}
+    stage = str(metadata.get("workflow_stage") or "")
+    selected_ids = metadata.get("selected_anomaly_ids") or []
+    successful_runs = [
+        run
+        for run in getattr(draft, "model_runs", []) or []
+        if getattr(run, "status", "") == "success" and "comparable" not in str(getattr(run, "purpose", "")).casefold()
+    ]
+    return stage == "model_deep_analysis" and bool(selected_ids) and bool(successful_runs)
 
 
 def _compact_cell(value: str, limit: int = 240) -> str:
