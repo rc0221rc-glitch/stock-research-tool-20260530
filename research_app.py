@@ -14,7 +14,7 @@ for _module_name in list(sys.modules):
 from src.research_anomalies import POSITIVE, RISK
 from src.research_display import company_display_name, display_name_lookup, point_display_name, replace_identifier_with_name, resolve_display_name
 from src.research_html import save_dashboard_html, save_memo_html
-from src.research_llm import deepseek_key_status
+from src.research_llm import PROVIDER_MODEL_OPTIONS, llm_key_status, resolve_llm_provider_config, test_llm_connection
 from src.research_pipeline import collect_research_draft, run_deep_analysis_for_selected_anomalies
 from src.research_storage import (
     create_research_job,
@@ -58,12 +58,32 @@ def init_state() -> None:
     st.session_state.setdefault("dashboard_path", "")
 
 
-def render_sidebar() -> tuple[str, str, str]:
+def render_sidebar() -> tuple[str, str, Any]:
     with st.sidebar:
         st.header("内测设置")
         user_id = st.text_input("当前用户 ID", value="admin", help="V0.1 先用文本 ID；后续接 WeChat 登录后会替换为真实用户。")
-        deepseek_api_key = st.text_input("DeepSeek API Key", value="", type="password", help="用于真正调用大模型生成/改写研究信号；不会写入仓库。")
-        key_status = deepseek_key_status(deepseek_api_key)
+        st.subheader("大模型")
+        provider_label = st.selectbox(
+            "模型厂商",
+            ["Anthropic（qweapi）", "OpenAI（qweapi）", "DeepSeek（直连）"],
+            index=0,
+            help="Anthropic 和 OpenAI 通过 qweapi.com 的 OpenAI 兼容接口调用；DeepSeek 保留直连。",
+        )
+        provider = {
+            "Anthropic（qweapi）": "anthropic",
+            "OpenAI（qweapi）": "openai",
+            "DeepSeek（直连）": "deepseek",
+        }[provider_label]
+        model_options = PROVIDER_MODEL_OPTIONS[provider]
+        model = st.selectbox("研究模型", model_options, index=0)
+        key_help = (
+            "Anthropic/OpenAI 使用 qweapi key；生产部署建议写入 Streamlit Secrets 的 QWEAPI_API_KEY。"
+            if provider in {"anthropic", "openai"}
+            else "DeepSeek 使用 DEEPSEEK_API_KEY；生产部署建议写入 Streamlit Secrets。"
+        )
+        llm_api_key = st.text_input("模型 API Key", value="", type="password", help=f"可临时输入；{key_help} 不会写入仓库。")
+        llm_config = resolve_llm_provider_config(llm_api_key, provider=provider, model=model)
+        key_status = llm_key_status(llm_api_key, provider=provider)
         if any(key_status.values()):
             source = (
                 "页面输入"
@@ -74,9 +94,14 @@ def render_sidebar() -> tuple[str, str, str]:
                 if key_status["process_env"]
                 else "本地 .env"
             )
-            st.success(f"DeepSeek Key 已可用（来源：{source}）。")
+            route = "qweapi.com" if provider in {"anthropic", "openai"} else "DeepSeek API"
+            st.success(f"{provider_label} Key 已可用（来源：{source}，路由：{route}，模型：{llm_config.model}）。")
         else:
-            st.error("DeepSeek Key 不可用：请在 Streamlit Secrets / 环境变量 / 本地 `.env` 写入 DEEPSEEK_API_KEY，或临时在页面输入。")
+            st.error("模型 Key 不可用：Anthropic/OpenAI 请配置 QWEAPI_API_KEY；DeepSeek 请配置 DEEPSEEK_API_KEY，或临时在页面输入。")
+        if st.button("测试模型连接", use_container_width=True):
+            with st.spinner(f"正在测试 {llm_config.model} 连接..."):
+                ok, message = test_llm_connection(llm_config)
+            st.success(message) if ok else st.error(message)
         claude_api_key = st.text_input("Anthropic API Key（可选）", value="", type="password", help="当前仅传给已有下载器兜底逻辑；正式多模型研究层后续接入。")
         st.divider()
         st.subheader("权限与数据库")
@@ -87,10 +112,10 @@ def render_sidebar() -> tuple[str, str, str]:
         with st.expander("Supabase 表结构建议"):
             st.code(suggested_supabase_schema(), language="sql")
         st.caption("V0.1 已预留任务、报告权限和访问日志结构；真正的后台队列与微信通知会在下一阶段接入。")
-    return user_id.strip() or "anonymous", claude_api_key.strip(), deepseek_api_key.strip()
+    return user_id.strip() or "anonymous", claude_api_key.strip(), llm_config
 
 
-def render_target_form(deepseek_api_key: str) -> None:
+def render_target_form(llm_config: Any) -> None:
     st.subheader("1. 输入目标公司")
     with st.form("target_form", clear_on_submit=False):
         col_target, col_window = st.columns([2, 1])
@@ -108,8 +133,8 @@ def render_target_form(deepseek_api_key: str) -> None:
         target_query = target_query.strip() or "NVDA"
         st.session_state.target_query = target_query
         st.session_state.quarter_count = quarter_count
-        with st.spinner("正在调用 DeepSeek 精选高度可比公司；这一步会严格区分核心可比与交叉验证对象..."):
-            groups, model_run = recommend_comparable_groups_with_llm(target_query, deepseek_api_key=deepseek_api_key)
+        with st.spinner(f"正在调用 {llm_config.model} 精选高度可比公司；这一步会严格区分核心可比与交叉验证对象..."):
+            groups, model_run = recommend_comparable_groups_with_llm(target_query, llm_config=llm_config)
         st.session_state.base_groups = groups
         st.session_state.comparable_model_run = model_run
         st.session_state.selected_groups = st.session_state.base_groups
@@ -118,9 +143,9 @@ def render_target_form(deepseek_api_key: str) -> None:
         st.session_state.dashboard_path = ""
         model_message = model_run.error or model_run.output_summary or model_run.status
         if model_run.status == "success":
-            st.success("DeepSeek 已完成高度可比公司精选。")
+            st.success(f"{model_run.model} 已完成高度可比公司精选。")
         else:
-            st.error(f"DeepSeek 可比公司精选未成功。请检查模型运行记录后重试。原因：{model_message}")
+            st.error(f"可比公司精选未成功。请检查模型运行记录后重试。原因：{model_message}")
 
 
 def render_comparable_editor() -> list[Any]:
@@ -130,10 +155,10 @@ def render_comparable_editor() -> list[Any]:
     selected_by_group: dict[str, list[str]] = {}
     model_run = st.session_state.get("comparable_model_run")
     if model_run:
-        with st.expander("DeepSeek 可比公司选择运行记录", expanded=getattr(model_run, "status", "") != "success"):
+        with st.expander("大模型可比公司选择运行记录", expanded=getattr(model_run, "status", "") != "success"):
             st.json(model_run.to_dict() if hasattr(model_run, "to_dict") else model_run)
     if not st.session_state.base_groups:
-        st.warning("尚未生成可比公司建议。请在第一步输入目标公司并回车/点击按钮，系统会先调用 DeepSeek 精选高度可比公司。")
+        st.warning("尚未生成可比公司建议。请在第一步输入目标公司并回车/点击按钮，系统会先调用大模型精选高度可比公司。")
         return []
     for group in st.session_state.base_groups:
         with st.expander(group.title, expanded=True):
@@ -168,11 +193,11 @@ def render_comparable_editor() -> list[Any]:
     return selected_groups
 
 
-def render_task_runner(user_id: str, claude_api_key: str, deepseek_api_key: str, selected_groups: list[Any]) -> None:
+def render_task_runner(user_id: str, claude_api_key: str, llm_config: Any, selected_groups: list[Any]) -> None:
     st.subheader("3. 第一阶段：客观扫描 → 异常清单")
     st.caption("第一阶段只做客观工作：找信息、横纵向对比、列出异常。不调用大模型做主观深度判断，先让你选择哪些值得挖。")
     if not selected_groups:
-        st.info("请先在第一步生成 DeepSeek 高度可比公司建议，并在第二步确认可比公司后再开始客观扫描。")
+        st.info("请先在第一步生成高度可比公司建议，并在第二步确认可比公司后再开始客观扫描。")
         return
     include_external_search = st.checkbox("启用外部公开信息搜索（媒体、平台、私有玩家线索）", value=True)
     capture_screenshots = st.checkbox("为关键证据生成网页/PDF 截图", value=True)
@@ -198,7 +223,7 @@ def render_task_runner(user_id: str, claude_api_key: str, deepseek_api_key: str,
                     quarter_count=st.session_state.quarter_count,
                     comparable_groups=selected_groups,
                     claude_api_key=claude_api_key,
-                    deepseek_api_key=deepseek_api_key,
+                    llm_config=llm_config,
                     require_llm=False,
                     enable_llm=False,
                     include_external_search=include_external_search,
@@ -221,7 +246,7 @@ def render_task_runner(user_id: str, claude_api_key: str, deepseek_api_key: str,
             st.error(f"任务失败：{exc}")
 
 
-def render_draft_review(user_id: str, deepseek_api_key: str) -> None:
+def render_draft_review(user_id: str, llm_config: Any) -> None:
     draft = st.session_state.research_draft
     if not draft:
         return
@@ -234,7 +259,7 @@ def render_draft_review(user_id: str, deepseek_api_key: str) -> None:
     summary_cols[2].metric("真实财务图表", len(draft.financial_charts))
     summary_cols[3].metric("审计项", len(draft.audit_findings))
 
-    render_anomaly_selector(user_id, deepseek_api_key)
+    render_anomaly_selector(user_id, llm_config)
 
     st.subheader("5. 审阅深度分析与证据")
     tab_checklist, tab_models, tab_charts, tab_signals, tab_audit, tab_evidence, tab_plan = st.tabs(["自动验收清单", "模型运行记录", "真实财务图表", "深度分析信号", "证据审计", "候选证据", "下一步验证"])
@@ -339,7 +364,7 @@ def render_draft_review(user_id: str, deepseek_api_key: str) -> None:
     render_downloads()
 
 
-def render_anomaly_selector(user_id: str, deepseek_api_key: str) -> None:
+def render_anomaly_selector(user_id: str, llm_config: Any) -> None:
     draft = st.session_state.research_draft
     if not draft:
         return
@@ -367,14 +392,14 @@ def render_anomaly_selector(user_id: str, deepseek_api_key: str) -> None:
     with st.container(border=True):
         st.markdown("**第二阶段：基于你勾选的异常做深度分析**")
         st.caption("这一阶段才调用大模型：分析背后原因、验证路径、图表表达方式和后续抓取计划。")
-        require_llm = st.checkbox("必须成功调用 DeepSeek，否则标记为失败", value=True, key="require_llm_deep_analysis")
+        require_llm = st.checkbox("必须成功调用大模型，否则标记为失败", value=True, key="require_llm_deep_analysis")
         disabled = not selected
         if st.button("对已勾选异常进行深度分析", type="primary", disabled=disabled, use_container_width=True):
             with st.spinner("正在围绕已勾选异常做深度分析。请稍等，这一步会调用大模型…"):
                 updated = run_deep_analysis_for_selected_anomalies(
                     draft,
                     selected_anomaly_ids=selected,
-                    deepseek_api_key=deepseek_api_key,
+                    llm_config=llm_config,
                     require_llm=require_llm,
                 )
             st.session_state.research_draft = updated
@@ -384,9 +409,9 @@ def render_anomaly_selector(user_id: str, deepseek_api_key: str) -> None:
                 metadata={"job_id": _job_id(), "selected_anomaly_ids": selected, "model_runs": len(updated.model_runs)},
             )
             if any(run.status == "success" for run in updated.model_runs):
-                st.success("深度分析完成：DeepSeek 已围绕你勾选的异常生成分析信号。")
+                st.success("深度分析完成：大模型已围绕你勾选的异常生成分析信号。")
             else:
-                st.error("深度分析未成功调用大模型；请检查 DeepSeek Key 或模型运行记录。")
+                st.error("深度分析未成功调用大模型；请检查 API Key、模型名称或模型运行记录。")
 
 
 def _render_static_table(rows: list[dict[str, Any]], max_rows: int = 80) -> None:
@@ -499,16 +524,16 @@ def _job_id() -> str:
 
 def main() -> None:
     init_state()
-    user_id, claude_api_key, deepseek_api_key = render_sidebar()
+    user_id, claude_api_key, llm_config = render_sidebar()
     st.title("🧠 AI 行业研究工具 · 独立原型入口")
     st.caption("目标：从大量公司文件、业绩会纪要、外部可信信息中筛出真正值得投资人关注的信号，并生成可追溯 HTML。")
-    render_target_form(deepseek_api_key)
+    render_target_form(llm_config)
     st.divider()
     selected_groups = render_comparable_editor()
     st.divider()
-    render_task_runner(user_id, claude_api_key, deepseek_api_key, selected_groups)
+    render_task_runner(user_id, claude_api_key, llm_config, selected_groups)
     st.divider()
-    render_draft_review(user_id, deepseek_api_key)
+    render_draft_review(user_id, llm_config)
     st.caption("V0.1 原型：同步执行任务并模拟任务队列。下一阶段会接入真正后台队列、微信登录/通知、权限管理和访问行为日志。")
 
 

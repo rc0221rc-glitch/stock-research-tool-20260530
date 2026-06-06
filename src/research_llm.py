@@ -4,6 +4,7 @@ import json
 import os
 import re
 import time
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -15,25 +16,146 @@ from .research_models import CompanyProfile, ComparableGroup, EvidenceItem, Fina
 
 DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 DEEPSEEK_MODEL = "deepseek-v4-pro"
+QWEAPI_BASE_URL = "https://qweapi.com"
+ANTHROPIC_TOP_MODEL = "claude-opus-4-8"
+OPENAI_TOP_MODEL = "gpt-5.5"
+QWEAPI_DEFAULT_MODEL = ANTHROPIC_TOP_MODEL
+QWEAPI_GPT_MODEL = OPENAI_TOP_MODEL
+PROVIDER_MODEL_OPTIONS: dict[str, list[str]] = {
+    "deepseek": [DEEPSEEK_MODEL, "deepseek-r1", "deepseek-v3.2"],
+    "anthropic": [ANTHROPIC_TOP_MODEL, "claude-opus-4-7", "claude-opus-4-6", "claude-sonnet-4-6"],
+    "openai": [OPENAI_TOP_MODEL, "gpt-5.4", "gpt-5.3-codex"],
+}
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
-def resolve_deepseek_api_key(explicit_key: str = "") -> str:
-    return (
-        explicit_key.strip()
-        or _read_streamlit_secret("DEEPSEEK_API_KEY")
-        or os.getenv("DEEPSEEK_API_KEY", "").strip()
-        or _read_local_env_secret("DEEPSEEK_API_KEY")
+@dataclass(frozen=True)
+class LLMProviderConfig:
+    provider: str
+    base_url: str
+    model: str
+    api_key: str
+
+    @property
+    def chat_url(self) -> str:
+        return f"{self.base_url.rstrip('/')}/v1/chat/completions"
+
+
+def resolve_llm_provider_config(
+    explicit_key: str = "",
+    *,
+    provider: str = "",
+    model: str = "",
+    base_url: str = "",
+) -> LLMProviderConfig:
+    provider = _normalize_provider(provider or _read_config_value("LLM_PROVIDER") or "anthropic")
+    if provider in {"anthropic", "openai", "qweapi"}:
+        default_model = _default_model_for_provider(provider)
+        return LLMProviderConfig(
+            provider=provider,
+            base_url=(base_url or _read_config_value("QWEAPI_BASE_URL") or QWEAPI_BASE_URL).strip(),
+            model=(model or _model_config_value_for_provider(provider) or default_model).strip(),
+            api_key=(
+                explicit_key.strip()
+                or _api_key_config_value_for_provider(provider)
+                or _read_config_value("OPENAI_API_KEY")
+            ),
+        )
+    return LLMProviderConfig(
+        provider="deepseek",
+        base_url=(base_url or _read_config_value("DEEPSEEK_BASE_URL") or DEEPSEEK_BASE_URL).strip(),
+        model=(model or _read_config_value("DEEPSEEK_MODEL") or DEEPSEEK_MODEL).strip(),
+        api_key=explicit_key.strip() or _read_config_value("DEEPSEEK_API_KEY"),
     )
 
 
-def deepseek_key_status(explicit_key: str = "") -> dict[str, bool]:
+def llm_key_status(explicit_key: str = "", *, provider: str = "qweapi") -> dict[str, bool]:
+    provider = _normalize_provider(provider or "anthropic")
+    names = _api_key_names_for_provider(provider)
     return {
         "ui": bool(explicit_key.strip()),
-        "streamlit_secrets": bool(_read_streamlit_secret("DEEPSEEK_API_KEY")),
-        "process_env": bool(os.getenv("DEEPSEEK_API_KEY", "").strip()),
-        "local_env": bool(_read_local_env_secret("DEEPSEEK_API_KEY")),
+        "streamlit_secrets": any(bool(_read_streamlit_secret(name)) for name in names),
+        "process_env": any(bool(os.getenv(name, "").strip()) for name in names),
+        "local_env": any(bool(_read_local_env_secret(name)) for name in names),
     }
+
+
+def _normalize_provider(provider: str) -> str:
+    normalized = (provider or "").strip().lower().replace("-", "_")
+    if normalized in {"qwe", "qweapi", "openai_compatible"}:
+        return "anthropic"
+    if normalized in {"claude", "anthropic"}:
+        return "anthropic"
+    if normalized in {"openai", "gpt"}:
+        return "openai"
+    if normalized in {"deepseek", "deep_seek"}:
+        return "deepseek"
+    return "anthropic"
+
+
+def _default_model_for_provider(provider: str) -> str:
+    return PROVIDER_MODEL_OPTIONS.get(provider, [ANTHROPIC_TOP_MODEL])[0]
+
+
+def _api_key_names_for_provider(provider: str) -> list[str]:
+    if provider == "deepseek":
+        return ["DEEPSEEK_API_KEY"]
+    if provider == "openai":
+        return ["QWEAPI_API_KEY", "OPENAI_QWEAPI_API_KEY", "OPENAI_API_KEY"]
+    return ["QWEAPI_API_KEY", "ANTHROPIC_QWEAPI_API_KEY", "ANTHROPIC_API_KEY"]
+
+
+def _api_key_config_value_for_provider(provider: str) -> str:
+    for name in _api_key_names_for_provider(provider):
+        value = _read_config_value(name)
+        if value:
+            return value
+    return ""
+
+
+def _model_config_value_for_provider(provider: str) -> str:
+    names = {
+        "deepseek": ["DEEPSEEK_MODEL"],
+        "openai": ["OPENAI_QWEAPI_MODEL"],
+        "anthropic": ["ANTHROPIC_QWEAPI_MODEL"],
+    }.get(provider, [])
+    for name in names:
+        value = _read_config_value(name)
+        if value:
+            return value
+    return ""
+
+
+def test_llm_connection(config: LLMProviderConfig, timeout: int = 30) -> tuple[bool, str]:
+    if not config.api_key:
+        return False, f"{config.provider} API key is missing"
+    payload = {
+        "model": config.model,
+        "messages": [
+            {
+                "role": "user",
+                "content": '请只返回一个 JSON 对象：{"ok":true}',
+            }
+        ],
+        "response_format": {"type": "json_object"},
+        "temperature": 0,
+        "max_tokens": 80,
+    }
+    try:
+        response, mode, notes = _post_chat_completion(config, payload, timeout)
+        data = response.json()
+        content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+        return True, f"连接成功：provider={config.provider}; model={data.get('model') or config.model}; mode={mode}; notes={'; '.join(notes) or 'none'}; sample={content[:120]}"
+    except Exception as exc:
+        return False, str(exc)
+
+
+def resolve_deepseek_api_key(explicit_key: str = "") -> str:
+    return resolve_llm_provider_config(explicit_key, provider="deepseek").api_key
+
+
+def deepseek_key_status(explicit_key: str = "") -> dict[str, bool]:
+    return llm_key_status(explicit_key, provider="deepseek")
 
 
 def generate_deepseek_research_signals(
@@ -48,27 +170,53 @@ def generate_deepseek_research_signals(
     fallback_signals: list[ResearchSignal],
     timeout: int = 180,
 ) -> tuple[list[ResearchSignal], list[str], ModelRunRecord]:
+    config = resolve_llm_provider_config(api_key, provider="deepseek")
+    return generate_llm_research_signals(
+        config=config,
+        target_name=target_name,
+        quarter_count=quarter_count,
+        comparable_groups=comparable_groups,
+        evidence=evidence,
+        financial_charts=financial_charts,
+        selected_anomalies=selected_anomalies,
+        fallback_signals=fallback_signals,
+        timeout=timeout,
+    )
+
+
+def generate_llm_research_signals(
+    *,
+    config: LLMProviderConfig,
+    target_name: str,
+    quarter_count: int,
+    comparable_groups: list[ComparableGroup],
+    evidence: list[EvidenceItem],
+    financial_charts: list[FinancialChart],
+    selected_anomalies: list[ObjectiveAnomaly] | None = None,
+    fallback_signals: list[ResearchSignal],
+    timeout: int = 180,
+) -> tuple[list[ResearchSignal], list[str], ModelRunRecord]:
     started = datetime.now()
     start = time.monotonic()
     run = ModelRunRecord(
-        provider="deepseek",
-        model=DEEPSEEK_MODEL,
+        provider=config.provider,
+        model=config.model,
         purpose="Deep-analyze user-selected objective anomalies using collected financial charts, comparables, and source evidence.",
         status="attempted",
         started_at=started.strftime("%Y-%m-%d %H:%M:%S"),
         prompt_summary=f"target={target_name}; quarters={quarter_count}; evidence={len(evidence)}; charts={len(financial_charts)}",
     )
     try:
-        payload = _build_payload(target_name, quarter_count, comparable_groups, evidence, financial_charts, selected_anomalies or [], fallback_signals)
-        response, compatibility_mode, retry_notes = _post_chat_completion(api_key, payload, timeout)
+        payload = _with_model(_build_payload(target_name, quarter_count, comparable_groups, evidence, financial_charts, selected_anomalies or [], fallback_signals), config.model)
+        response, compatibility_mode, retry_notes = _post_chat_completion(config, payload, timeout)
         data = response.json()
         content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
-        parsed, parse_note = _parse_or_repair_json_object(api_key, content, timeout)
+        parsed, parse_note = _parse_or_repair_json_object(config, content, timeout)
         signals = _signals_from_payload(parsed, evidence)
         next_plan_raw = parsed.get("next_fetch_plan", [])
         next_plan = [str(item) for item in (next_plan_raw if isinstance(next_plan_raw, list) else []) if str(item).strip()]
         signals, next_plan, contract_note = _ensure_signal_contract(
-            api_key=api_key,
+            config=config,
             target_name=target_name,
             quarter_count=quarter_count,
             comparable_groups=comparable_groups,
@@ -81,7 +229,7 @@ def generate_deepseek_research_signals(
             timeout=timeout,
         )
         if not signals:
-            raise ValueError("DeepSeek returned no valid signals")
+            raise ValueError(f"{config.provider} returned no valid signals")
         completed = datetime.now()
         run.status = "success"
         run.completed_at = completed.strftime("%Y-%m-%d %H:%M:%S")
@@ -103,16 +251,20 @@ def generate_deepseek_research_signals(
 
 
 def missing_deepseek_key_record() -> ModelRunRecord:
+    return missing_llm_key_record(resolve_llm_provider_config(provider="deepseek"))
+
+
+def missing_llm_key_record(config: LLMProviderConfig) -> ModelRunRecord:
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     return ModelRunRecord(
-        provider="deepseek",
-        model=DEEPSEEK_MODEL,
+        provider=config.provider,
+        model=config.model,
         purpose="Generate evidence-grounded alpha signals from collected financial charts, comparables, and source evidence.",
         status="skipped",
         started_at=now,
         completed_at=now,
         duration_seconds=0.0,
-        error="Missing DeepSeek API key from UI, Streamlit Secrets, process env, or local .env; LLM analysis was not executed.",
+        error=f"Missing {config.provider} API key from UI, Streamlit Secrets, process env, or local .env; LLM analysis was not executed.",
     )
 
 
@@ -123,25 +275,41 @@ def generate_deepseek_comparable_groups(
     max_core_companies: int = 5,
     timeout: int = 120,
 ) -> tuple[list[dict[str, Any]], ModelRunRecord]:
+    config = resolve_llm_provider_config(api_key, provider="deepseek")
+    return generate_llm_comparable_groups(
+        config=config,
+        target=target,
+        max_core_companies=max_core_companies,
+        timeout=timeout,
+    )
+
+
+def generate_llm_comparable_groups(
+    *,
+    config: LLMProviderConfig,
+    target: CompanyProfile,
+    max_core_companies: int = 5,
+    timeout: int = 120,
+) -> tuple[list[dict[str, Any]], ModelRunRecord]:
     started = datetime.now()
     start = time.monotonic()
     run = ModelRunRecord(
-        provider="deepseek",
-        model=DEEPSEEK_MODEL,
+        provider=config.provider,
+        model=config.model,
         purpose="Select highly comparable global companies before evidence collection.",
         status="attempted",
         started_at=started.strftime("%Y-%m-%d %H:%M:%S"),
         prompt_summary=f"target={target.ticker} {target.name}; market={target.market}; max_core={max_core_companies}",
     )
     try:
-        payload = _build_comparable_payload(target, max_core_companies)
-        response, compatibility_mode, retry_notes = _post_chat_completion(api_key, payload, timeout)
+        payload = _with_model(_build_comparable_payload(target, max_core_companies), config.model)
+        response, compatibility_mode, retry_notes = _post_chat_completion(config, payload, timeout)
         data = response.json()
         content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
-        parsed, parse_note = _parse_or_repair_json_object(api_key, content, timeout)
+        parsed, parse_note = _parse_or_repair_json_object(config, content, timeout)
         groups = _comparable_groups_from_payload(parsed)
         if not isinstance(groups, list) or not groups:
-            raise ValueError("DeepSeek returned no comparable groups")
+            raise ValueError(f"{config.provider} returned no comparable groups")
         completed = datetime.now()
         run.status = "success"
         run.completed_at = completed.strftime("%Y-%m-%d %H:%M:%S")
@@ -176,7 +344,7 @@ def _comparable_groups_from_payload(payload: dict[str, Any]) -> list[dict[str, A
                 "group_id": "core_comparable",
                 "title": "核心业务高度可比公司",
                 "purpose": "用于目标公司横向对比",
-                "selection_logic": str(payload.get("selection_logic") or "由 DeepSeek 根据核心业务可比性筛选"),
+                "selection_logic": str(payload.get("selection_logic") or "由大模型根据核心业务可比性筛选"),
                 "companies": core,
             }
         )
@@ -186,7 +354,7 @@ def _comparable_groups_from_payload(payload: dict[str, Any]) -> list[dict[str, A
                 "group_id": "cross_chain_validation",
                 "title": "上下游/需求侧交叉验证对象（非核心可比）",
                 "purpose": "用于验证行业景气度或风险，不作为核心可比公司",
-                "selection_logic": str(payload.get("cross_chain_logic") or "由 DeepSeek 根据产业链关系筛选"),
+                "selection_logic": str(payload.get("cross_chain_logic") or "由大模型根据产业链关系筛选"),
                 "companies": validators,
             }
         )
@@ -254,7 +422,7 @@ def _build_comparable_payload(target: CompanyProfile, max_core_companies: int) -
         "max_core_companies": max(3, min(5, max_core_companies)),
     }
     return {
-        "model": DEEPSEEK_MODEL,
+        "model": QWEAPI_DEFAULT_MODEL,
         "messages": [
             {"role": "system", "content": system},
             {"role": "user", "content": json.dumps(user, ensure_ascii=False)},
@@ -277,15 +445,51 @@ def _read_streamlit_secret(name: str) -> str:
         direct = str(secrets.get(name, "") or secrets.get(name.lower(), "") or "").strip()
         if direct:
             return direct
-        deepseek = secrets.get("deepseek", {})
-        if hasattr(deepseek, "get"):
-            for key in (name, name.lower(), "api_key", "key"):
-                value = str(deepseek.get(key, "") or "").strip()
-                if value:
-                    return value
+        for section_name in _secret_sections_for_name(name):
+            section = secrets.get(section_name, {})
+            if hasattr(section, "get"):
+                for key in _section_secret_aliases(name):
+                    value = str(section.get(key, "") or "").strip()
+                    if value:
+                        return value
     except Exception:
         return ""
     return ""
+
+
+def _secret_sections_for_name(name: str) -> tuple[str, ...]:
+    normalized = name.strip().upper()
+    if normalized.startswith("DEEPSEEK_"):
+        return ("deepseek", "llm")
+    if normalized.startswith("OPENAI_"):
+        return ("openai", "qweapi", "llm")
+    if normalized.startswith("ANTHROPIC_"):
+        return ("anthropic", "qweapi", "llm")
+    if normalized.startswith("QWEAPI_"):
+        return ("qweapi", "llm")
+    return ("llm", "qweapi", "deepseek")
+
+
+def _section_secret_aliases(name: str) -> tuple[str, ...]:
+    normalized = name.strip().upper()
+    aliases = [name, name.lower()]
+    if normalized.endswith("API_KEY"):
+        aliases.extend(["api_key", "key"])
+    elif normalized.endswith("BASE_URL"):
+        aliases.extend(["base_url", "url"])
+    elif normalized.endswith("MODEL"):
+        aliases.append("model")
+    elif normalized == "LLM_PROVIDER":
+        aliases.append("provider")
+    return tuple(dict.fromkeys(aliases))
+
+
+def _read_config_value(name: str) -> str:
+    return (
+        _read_streamlit_secret(name)
+        or os.getenv(name, "").strip()
+        or _read_local_env_secret(name)
+    )
 
 
 def _read_local_env_secret(name: str) -> str:
@@ -309,15 +513,15 @@ def _read_local_env_secret(name: str) -> str:
     return ""
 
 
-def _post_chat_completion(api_key: str, payload: dict[str, Any], timeout: int) -> tuple[requests.Response, str, list[str]]:
+def _post_chat_completion(config: LLMProviderConfig, payload: dict[str, Any], timeout: int) -> tuple[requests.Response, str, list[str]]:
     variants = _payload_variants(payload)
     retry_notes: list[str] = []
     last_error = ""
     for compatibility_mode, candidate in variants:
         response = requests.post(
-            f"{DEEPSEEK_BASE_URL}/chat/completions",
+            config.chat_url,
             headers={
-                "Authorization": f"Bearer {api_key}",
+                "Authorization": f"Bearer {config.api_key}",
                 "Content-Type": "application/json",
             },
             json=candidate,
@@ -329,7 +533,7 @@ def _post_chat_completion(api_key: str, payload: dict[str, Any], timeout: int) -
         retry_notes.append(f"{compatibility_mode}: {last_error}")
         if not _is_retryable_payload_error(last_error):
             break
-    raise RuntimeError(last_error or "DeepSeek request failed")
+    raise RuntimeError(last_error or f"{config.provider} request failed")
 
 
 def _payload_variants(payload: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
@@ -340,10 +544,16 @@ def _payload_variants(payload: dict[str, Any]) -> list[tuple[str, dict[str, Any]
     plain_json_prompt = dict(no_thinking)
     plain_json_prompt.pop("response_format", None)
     return [
-        ("v4_pro_thinking_json", base),
-        ("v4_pro_json_no_thinking", no_thinking),
-        ("v4_pro_plain_prompt_json", plain_json_prompt),
+        ("thinking_json", base),
+        ("json_no_thinking", no_thinking),
+        ("plain_prompt_json", plain_json_prompt),
     ]
+
+
+def _with_model(payload: dict[str, Any], model: str) -> dict[str, Any]:
+    updated = dict(payload)
+    updated["model"] = model
+    return updated
 
 
 def _safe_response_error(response: requests.Response) -> str:
@@ -451,7 +661,7 @@ def _build_payload(
         },
     }
     return {
-        "model": DEEPSEEK_MODEL,
+        "model": QWEAPI_DEFAULT_MODEL,
         "messages": [
             {"role": "system", "content": system},
             {"role": "user", "content": json.dumps(user, ensure_ascii=False)},
@@ -542,20 +752,20 @@ def _parse_json_object(content: str) -> dict[str, Any]:
         return json.loads(match.group(0))
 
 
-def _parse_or_repair_json_object(api_key: str, content: str, timeout: int) -> tuple[dict[str, Any], str]:
+def _parse_or_repair_json_object(config: LLMProviderConfig, content: str, timeout: int) -> tuple[dict[str, Any], str]:
     try:
         return _parse_json_object(content), ""
     except Exception as first_exc:
-        repaired = _repair_json_with_deepseek(api_key, content, timeout)
+        repaired = _repair_json_with_llm(config, content, timeout)
         try:
             return _parse_json_object(repaired), f"json_repair_success_after={type(first_exc).__name__}"
         except Exception as second_exc:
             raise ValueError(f"Initial JSON parse failed: {first_exc}; repair parse failed: {second_exc}") from second_exc
 
 
-def _repair_json_with_deepseek(api_key: str, broken_content: str, timeout: int) -> str:
+def _repair_json_with_llm(config: LLMProviderConfig, broken_content: str, timeout: int) -> str:
     payload = {
-        "model": DEEPSEEK_MODEL,
+        "model": config.model,
         "messages": [
             {"role": "system", "content": "You repair malformed JSON. Return strict JSON only. Do not add prose."},
             {
@@ -573,14 +783,14 @@ def _repair_json_with_deepseek(api_key: str, broken_content: str, timeout: int) 
         "temperature": 0.0,
         "max_tokens": 6000,
     }
-    response, _mode, _notes = _post_chat_completion(api_key, payload, timeout)
+    response, _mode, _notes = _post_chat_completion(config, payload, timeout)
     data = response.json()
     return data.get("choices", [{}])[0].get("message", {}).get("content", "")
 
 
 def _ensure_signal_contract(
     *,
-    api_key: str,
+    config: LLMProviderConfig,
     target_name: str,
     quarter_count: int,
     comparable_groups: list[ComparableGroup],
@@ -619,10 +829,11 @@ def _ensure_signal_contract(
             ),
         }
     )
-    response, mode, notes = _post_chat_completion(api_key, repair_payload, timeout)
+    repair_payload = _with_model(repair_payload, config.model)
+    response, mode, notes = _post_chat_completion(config, repair_payload, timeout)
     data = response.json()
     content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
-    parsed, parse_note = _parse_or_repair_json_object(api_key, content, timeout)
+    parsed, parse_note = _parse_or_repair_json_object(config, content, timeout)
     repaired_signals = _signals_from_payload(parsed, evidence)
     next_plan_raw = parsed.get("next_fetch_plan", [])
     repaired_plan = [str(item) for item in (next_plan_raw if isinstance(next_plan_raw, list) else []) if str(item).strip()]
@@ -635,7 +846,7 @@ def _ensure_signal_contract(
     if current_signals:
         note_parts.append(f"repair_still_failed={repaired_reason}; kept_initial_signals")
         return current_signals, current_plan, "; ".join(note_parts)
-    raise ValueError(f"DeepSeek signal contract failed: {repaired_reason}")
+    raise ValueError(f"{config.provider} signal contract failed: {repaired_reason}")
 
 
 def _signal_contract_status(signals: list[ResearchSignal]) -> tuple[bool, str]:

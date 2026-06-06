@@ -15,6 +15,7 @@ from reportlab.lib.units import mm
 from reportlab.platypus import PageBreak, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
 from .utils import clean_filename
+from .web_readability import extract_readable_document
 
 
 MAX_PARAGRAPHS = 180
@@ -147,9 +148,38 @@ def _extract_blocks(soup: BeautifulSoup) -> tuple[str, list[str], list[list[list
     return title, paragraphs, tables
 
 
+def _paragraphs_from_readable_text(text: str) -> list[str]:
+    paragraphs: list[str] = []
+    seen: set[str] = set()
+    for raw_paragraph in re.split(r"\n{1,}", text or ""):
+        paragraph = _clean_text(raw_paragraph)
+        if len(paragraph) < 35:
+            continue
+        lower = paragraph.casefold()
+        if any(token in lower[:120] for token in ["cookie", "advertisement", "subscribe", "sign up", "login", "all rights reserved"]):
+            continue
+        key = lower[:240]
+        if key in seen:
+            continue
+        seen.add(key)
+        paragraphs.append(paragraph[:1800])
+        if len(paragraphs) >= MAX_PARAGRAPHS:
+            break
+    if not paragraphs:
+        fallback = _clean_text(text)
+        if fallback:
+            paragraphs = [fallback[i : i + 1600] for i in range(0, min(len(fallback), 18000), 1600)]
+    return paragraphs
+
+
 def html_to_pdf_bytes(html_text: str, source_url: str = "", title: str = "") -> bytes:
     soup = BeautifulSoup(html_text or "", "lxml")
     html_title, paragraphs, tables = _extract_blocks(soup)
+    readable = extract_readable_document(html_text or "", url=source_url, fallback_title=title or html_title or "Web Page")
+    readable_paragraphs = _paragraphs_from_readable_text(readable.text)
+    if len(" ".join(readable_paragraphs)) > len(" ".join(paragraphs)) * 0.8:
+        paragraphs = readable_paragraphs
+        html_title = readable.title or html_title
     title = _clean_text(title or html_title or "Web Page")
 
     from io import BytesIO

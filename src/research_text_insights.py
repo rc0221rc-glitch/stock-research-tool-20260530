@@ -10,6 +10,7 @@ from bs4 import BeautifulSoup, XMLParsedAsHTMLWarning
 from .research_anomalies import POSITIVE, RISK
 from .research_models import EvidenceItem, ObjectiveAnomaly
 from .utils import request_text
+from .web_readability import extract_readable_document
 
 
 READABLE_TYPES = {"transcript", "presentation", "expert_memo", "external_signal", "web"}
@@ -165,6 +166,16 @@ def _fetch_readable_text(item: EvidenceItem) -> str:
         html = request_text(url, timeout=12)
     except Exception:
         return ""
+    document = extract_readable_document(html, url=url, fallback_title=item.title or "Web Page")
+    if len(document.text) >= 500:
+        best_text = document.text
+        if _looks_like_admin_filing_page(best_text) and not _has_business_discussion(best_text):
+            return ""
+        if item.evidence_type == "transcript" and not _has_transcript_markers(best_text):
+            return ""
+        if item.evidence_type == "presentation" and not _has_business_discussion(best_text):
+            return ""
+        return best_text[:12000]
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
         soup = BeautifulSoup(html, "lxml")

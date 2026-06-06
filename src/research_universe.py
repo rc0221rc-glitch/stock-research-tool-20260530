@@ -4,7 +4,7 @@ from dataclasses import replace
 from typing import Any
 
 from .company_search_global import find_best_company, search_companies
-from .research_llm import generate_deepseek_comparable_groups, missing_deepseek_key_record, resolve_deepseek_api_key
+from .research_llm import LLMProviderConfig, generate_llm_comparable_groups, missing_llm_key_record, resolve_llm_provider_config
 from .research_models import CompanyProfile, ComparableGroup, ModelRunRecord
 
 
@@ -208,14 +208,15 @@ def recommend_comparable_groups(target_query: str, max_core_companies: int = 5) 
 def recommend_comparable_groups_with_llm(
     target_query: str,
     deepseek_api_key: str = "",
+    llm_config: LLMProviderConfig | None = None,
     max_core_companies: int = 5,
 ) -> tuple[list[ComparableGroup], ModelRunRecord]:
     target = get_company_profile(target_query)
-    api_key = resolve_deepseek_api_key(deepseek_api_key)
-    if not api_key:
-        return [], missing_deepseek_key_record()
-    raw_groups, run = generate_deepseek_comparable_groups(
-        api_key=api_key,
+    llm_config = llm_config or resolve_llm_provider_config(deepseek_api_key)
+    if not llm_config.api_key:
+        return [], missing_llm_key_record(llm_config)
+    raw_groups, run = generate_llm_comparable_groups(
+        config=llm_config,
         target=target,
         max_core_companies=max_core_companies,
     )
@@ -278,7 +279,7 @@ def _groups_from_llm_payload(raw_groups: list[dict[str, Any]], target: CompanyPr
                 group_id=_safe_group_id(group_id),
                 title=str(raw_group.get("title") or "AI 精选可比/验证公司"),
                 purpose=str(raw_group.get("purpose") or "用于横向对比和交叉验证"),
-                selection_logic=str(raw_group.get("selection_logic") or "由 DeepSeek 根据核心业务可比性筛选"),
+                selection_logic=str(raw_group.get("selection_logic") or "由大模型根据核心业务可比性筛选"),
                 companies=companies,
             )
         )
@@ -332,7 +333,7 @@ def _profile_from_llm_company(raw_company: Any) -> CompanyProfile | None:
         role="LLM selected comparable",
         segment=str(raw_company.get("segment") or "LLM selected comparable").strip(),
         description=str(raw_company.get("reason") or "").strip(),
-        source_hint="DeepSeek comparable selection",
+        source_hint="LLM comparable selection",
         local_code=local_code,
     )
 
@@ -377,7 +378,7 @@ def _merge_llm_company_metadata(profile: CompanyProfile, raw_company: dict[str, 
         role="LLM selected comparable" if raw_company.get("is_core_comparable", True) else "LLM selected cross-chain validator",
         segment=segment or profile.segment,
         description="; ".join(description_parts),
-        source_hint=(profile.source_hint + " + DeepSeek comparable selection").strip(" +"),
+        source_hint=(profile.source_hint + " + LLM comparable selection").strip(" +"),
     )
 
 

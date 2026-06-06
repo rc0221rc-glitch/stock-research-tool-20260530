@@ -7,7 +7,7 @@ from typing import Any
 from .research_anomalies import build_objective_anomalies
 from .research_evidence_backfill import backfill_evidence_coverage
 from .research_financials import build_financial_charts
-from .research_llm import generate_deepseek_research_signals, missing_deepseek_key_record, resolve_deepseek_api_key
+from .research_llm import LLMProviderConfig, generate_llm_research_signals, missing_llm_key_record, resolve_llm_provider_config
 from .research_models import AuditFinding, CompanyProfile, EvidenceItem, FinancialChart, ObjectiveAnomaly, ResearchDraft, ResearchSignal, SignalScore
 from .research_screenshots import capture_evidence_screenshots
 from .research_text_insights import build_text_theme_anomalies, enrich_readable_evidence
@@ -32,6 +32,7 @@ def collect_research_draft(
     comparable_groups: list[Any] | None = None,
     claude_api_key: str = "",
     deepseek_api_key: str = "",
+    llm_config: LLMProviderConfig | None = None,
     require_llm: bool = False,
     enable_llm: bool = True,
     include_external_search: bool = True,
@@ -95,11 +96,11 @@ def collect_research_draft(
     signals = fallback_signals
     next_fetch_plan = build_next_fetch_plan(evidence, signals, groups, financial_charts)
     model_runs = []
-    deepseek_api_key = resolve_deepseek_api_key(deepseek_api_key) if enable_llm else ""
+    llm_config = llm_config or (resolve_llm_provider_config(deepseek_api_key) if enable_llm else None)
     should_run_deep_analysis = enable_llm and bool(selected_anomalies)
-    if should_run_deep_analysis and deepseek_api_key:
-        llm_signals, llm_plan, model_run = generate_deepseek_research_signals(
-            api_key=deepseek_api_key,
+    if should_run_deep_analysis and llm_config and llm_config.api_key:
+        llm_signals, llm_plan, model_run = generate_llm_research_signals(
+            config=llm_config,
             target_name=target.name,
             quarter_count=quarter_count,
             comparable_groups=groups,
@@ -114,7 +115,7 @@ def collect_research_draft(
             if llm_plan:
                 next_fetch_plan = llm_plan
     elif should_run_deep_analysis and require_llm:
-        model_runs.append(missing_deepseek_key_record())
+        model_runs.append(missing_llm_key_record(llm_config or resolve_llm_provider_config()))
     draft = ResearchDraft(
         target=target,
         quarter_count=quarter_count,
@@ -152,7 +153,7 @@ def collect_research_draft(
     )
     draft.validation_report = validate_research_draft(draft)
     if selected_anomalies and any(run.status == "success" for run in model_runs):
-        draft.report_label = "DeepSeek 已基于用户勾选的客观异常完成深度分析：仍需完成截图溯源、权限、队列等最终交付验收"
+        draft.report_label = "大模型已基于用户勾选的客观异常完成深度分析：仍需完成截图溯源、权限、队列等最终交付验收"
     elif selected_anomalies:
         draft.report_label = "深度分析草稿：用户已选择异常条目，但大模型未成功参与分析，未达到专业最终交付标准"
     else:
@@ -164,6 +165,7 @@ def run_deep_analysis_for_selected_anomalies(
     draft: ResearchDraft,
     selected_anomaly_ids: list[str],
     deepseek_api_key: str = "",
+    llm_config: LLMProviderConfig | None = None,
     require_llm: bool = True,
 ) -> ResearchDraft:
     selected_ids = set(selected_anomaly_ids)
@@ -215,10 +217,10 @@ def run_deep_analysis_for_selected_anomalies(
     _annotate_and_downgrade_weak_strong_signals(fallback_signals, draft.evidence)
     draft.signals = fallback_signals
     draft.next_fetch_plan = build_next_fetch_plan(draft.evidence, fallback_signals, draft.comparable_groups, draft.financial_charts)
-    api_key = resolve_deepseek_api_key(deepseek_api_key)
-    if selected and api_key:
-        llm_signals, llm_plan, model_run = generate_deepseek_research_signals(
-            api_key=api_key,
+    llm_config = llm_config or resolve_llm_provider_config(deepseek_api_key)
+    if selected and llm_config.api_key:
+        llm_signals, llm_plan, model_run = generate_llm_research_signals(
+            config=llm_config,
             target_name=draft.target.name,
             quarter_count=draft.quarter_count,
             comparable_groups=draft.comparable_groups,
@@ -233,10 +235,10 @@ def run_deep_analysis_for_selected_anomalies(
             if llm_plan:
                 draft.next_fetch_plan = llm_plan
     elif selected and require_llm:
-        draft.model_runs.append(missing_deepseek_key_record())
+        draft.model_runs.append(missing_llm_key_record(llm_config))
 
     if selected and any(run.status == "success" for run in draft.model_runs):
-        draft.report_label = "DeepSeek 已基于用户勾选的客观异常完成深度分析：仍需完成截图溯源、权限、队列等最终交付验收"
+        draft.report_label = "大模型已基于用户勾选的客观异常完成深度分析：仍需完成截图溯源、权限、队列等最终交付验收"
     elif selected:
         draft.report_label = "深度分析草稿：用户已选择异常条目，但大模型未成功参与分析，未达到专业最终交付标准"
     else:

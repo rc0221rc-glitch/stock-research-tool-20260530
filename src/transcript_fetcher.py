@@ -12,6 +12,7 @@ from bs4 import BeautifulSoup
 
 from .utils import DEFAULT_HEADERS, LinkResult, clean_filename, dedupe_links, hard_timeout, request_text, run_limited, search_url, url_exists
 from .web_pdf import save_html_as_pdf
+from .web_readability import extract_readable_document
 
 
 SESSION = requests.Session()
@@ -553,6 +554,9 @@ def find_transcripts(
 
 
 def _extract_transcript_text(html_content: str) -> str | None:
+    document = extract_readable_document(html_content, fallback_title="Transcript")
+    if len(document.text) > 500 and _looks_like_transcript_text(document.text):
+        return document.text
     soup = BeautifulSoup(html_content, "lxml")
     selectors = [
         "#transcript-panel-full",
@@ -605,6 +609,25 @@ def _extract_transcript_text(html_content: str) -> str | None:
         if len(text) > 500:
             paragraphs = [text]
     return "\n\n".join(paragraphs) if paragraphs else None
+
+
+def _looks_like_transcript_text(text: str) -> bool:
+    lower = (text or "").casefold()
+    markers = [
+        "earnings call",
+        "conference call",
+        "prepared remarks",
+        "question-and-answer",
+        "question and answer",
+        "operator",
+        "q&a",
+        "业绩会",
+        "电话会",
+        "交流纪要",
+        "问答",
+        "管理层",
+    ]
+    return sum(marker in lower for marker in markers) >= 2
 
 
 def download_transcript_items(items: list[dict[str, Any]], target_dir: str | Path, ticker: str = "") -> list[Path]:

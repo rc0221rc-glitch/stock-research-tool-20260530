@@ -16,6 +16,16 @@
 - 可选 Claude 增强：输入 Anthropic API Key 后，可用于 Sheet 智能命名和自动发现失败时的兜底建议。
 - 健壮降级：单个数据源失败不会中断其它来源；Transcript / Presentation 搜索带线程硬超时，避免长时间卡住。
 
+## 开源工具集成
+
+当前版本已开始吸收 GitHub 高星开源项目中适合本工具目标的成熟能力：
+
+- 网页正文抽取：接入 `trafilatura` 与 `readability-lxml`，用于更稳定地阅读 transcript、presentation 网页、微信公众号转载页和财经新闻页面。
+- 网页转 PDF：网页放入下载包前优先使用开源正文抽取结果，同时保留原始 HTML 表格抽取，减少广告、导航栏、登录提示对 PDF 的污染。
+- 表格与 Excel：继续使用 `pdfplumber`、`BeautifulSoup` 与 `openpyxl`，后续可评估接入 `camelot` 或 `docling` 处理更复杂 PDF 表格。
+- 金融数据：当前已有 `yfinance`、SEC companyfacts、巨潮、Wind MCP 通道；后续可评估接入 `akshare` 与 `edgartools`，分别增强中国市场数据和 SEC/XBRL 解析。
+- 可视化：当前 HTML 使用原生交互图表逻辑；后续可评估接入 `plotly.py` 或 ECharts，以提升固定 13 张财务图的移动端交互体验。
+
 ## 安装
 
 建议使用 Python 3.10 或更高版本。
@@ -52,6 +62,16 @@ streamlit run research_app.py
 - 复用现有 SEC、IR、Transcript、Presentation、Bing 定向搜索和中文来源模块，生成证据审计与信号草稿。
 - 在用户确认草稿后，生成投资备忘录 HTML 和交互式看板 HTML。
 - HTML 中的信号卡片、审计项和证据表支持点击打开来源抽屉，后续会继续补 PDF / 网页截图、页码跳转和表格单元格溯源。
+
+### 大模型厂商
+
+研究入口左侧边栏支持按厂商选择模型：
+
+- `Anthropic（qweapi）`：默认优先调用 `claude-opus-4-8`，通过 `https://qweapi.com/v1/chat/completions`。
+- `OpenAI（qweapi）`：默认优先调用 `gpt-5.5`，通过 `https://qweapi.com/v1/chat/completions`。
+- `DeepSeek（直连）`：默认优先调用 `deepseek-v4-pro`，通过 DeepSeek 官方兼容接口。
+- 本地 `.env` 或 Streamlit Secrets 可配置：`LLM_PROVIDER=anthropic` / `openai` / `deepseek`、`QWEAPI_API_KEY=你的 qweapi key`、`ANTHROPIC_QWEAPI_MODEL=claude-opus-4-8`、`OPENAI_QWEAPI_MODEL=gpt-5.5`、`DEEPSEEK_API_KEY=你的 DeepSeek key`
+- 侧边栏提供“测试模型连接”按钮，可在正式研究前确认模型是否可调用。
 
 研究工具默认本地会话即可运行；如果配置 `SUPABASE_URL` 和 `SUPABASE_SERVICE_ROLE_KEY` 环境变量，会把任务、报告元数据和访问日志写入 Supabase/Postgres。V0.1 先预留微信登录、授权用户可见、访问行为记录和异步任务队列结构，后台队列与企业微信通知会在下一阶段接入。
 
