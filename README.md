@@ -20,7 +20,8 @@
 
 当前版本已开始吸收 GitHub 高星开源项目中适合本工具目标的成熟能力：
 
-- 网页正文抽取：接入 `trafilatura` 与 `readability-lxml`，用于更稳定地阅读 transcript、presentation 网页、微信公众号转载页和财经新闻页面。
+- 网页正文抽取：接入 `trafilatura`、`readability-lxml` 与 D4Vinci `Scrapling` parser，用于更稳定地阅读 transcript、presentation 网页、微信公众号转载页和财经新闻页面。
+- 抓取兜底：通用 `request_text` 在普通 `requests` 遇到拦截页、短空页面或失败时，会尝试调用 Scrapling Fetcher；若部署环境没有浏览器 fetcher 依赖，则自动退回原逻辑，不影响 Streamlit 启动。
 - 网页转 PDF：网页放入下载包前优先使用开源正文抽取结果，同时保留原始 HTML 表格抽取，减少广告、导航栏、登录提示对 PDF 的污染。
 - 表格与 Excel：继续使用 `pdfplumber`、`BeautifulSoup` 与 `openpyxl`，后续可评估接入 `camelot` 或 `docling` 处理更复杂 PDF 表格。
 - 金融数据：当前已有 `yfinance`、SEC companyfacts、巨潮、Wind MCP 通道；后续可评估接入 `akshare` 与 `edgartools`，分别增强中国市场数据和 SEC/XBRL 解析。

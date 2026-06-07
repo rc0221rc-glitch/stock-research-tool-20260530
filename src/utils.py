@@ -93,11 +93,52 @@ def request_json(url: str, timeout: float = 10, **kwargs: Any) -> Any:
 def request_text(url: str, timeout: float = 10, **kwargs: Any) -> str:
     headers = dict(DEFAULT_HEADERS)
     headers.update(kwargs.pop("headers", {}) or {})
-    response = requests.get(url, headers=headers, timeout=timeout, **kwargs)
-    response.raise_for_status()
-    if not response.encoding:
-        response.encoding = response.apparent_encoding
-    return response.text
+    request_error: Exception | None = None
+    try:
+        response = requests.get(url, headers=headers, timeout=timeout, **kwargs)
+        response.raise_for_status()
+        if not response.encoding:
+            response.encoding = response.apparent_encoding
+        text = response.text
+        if _should_retry_with_scrapling(text, response.url):
+            try:
+                scrapling_text = _request_text_with_scrapling(url, timeout=timeout, headers=headers, **kwargs)
+                if len(scrapling_text.strip()) > len(text.strip()):
+                    return scrapling_text
+            except Exception:
+                return text
+        return text
+    except Exception as exc:
+        request_error = exc
+    try:
+        return _request_text_with_scrapling(url, timeout=timeout, headers=headers, **kwargs)
+    except Exception:
+        if request_error:
+            raise request_error
+        raise
+
+
+def _request_text_with_scrapling(url: str, timeout: float = 10, **kwargs: Any) -> str:
+    from .scrapling_fetcher import fetch_text_with_scrapling
+
+    return fetch_text_with_scrapling(url, timeout=timeout, **kwargs)
+
+
+def _should_retry_with_scrapling(text: str, url: str) -> bool:
+    sample = " ".join((text or "").casefold().split())[:2000]
+    if len(sample) < 400:
+        return True
+    blocked_tokens = [
+        "enable javascript",
+        "checking your browser",
+        "access denied",
+        "temporarily blocked",
+        "unusual traffic",
+        "captcha",
+        "robot check",
+        "verify you are human",
+    ]
+    return any(token in sample for token in blocked_tokens)
 
 
 def url_exists(url: str, timeout: float = 5, must_contain: str | None = None) -> bool:

@@ -18,7 +18,7 @@ class ReadableDocument:
 
 def extract_readable_document(html_text: str, *, url: str = "", fallback_title: str = "Web Page") -> ReadableDocument:
     """Extract main article/transcript content using optional OSS tools, with BS4 fallback."""
-    for extractor in (_extract_with_trafilatura, _extract_with_readability):
+    for extractor in (_extract_with_trafilatura, _extract_with_readability, _extract_with_scrapling):
         document = extractor(html_text, url=url, fallback_title=fallback_title)
         if document and len(document.text) >= 500:
             return document
@@ -63,6 +63,74 @@ def _extract_with_readability(html_text: str, *, url: str, fallback_title: str) 
         return ReadableDocument(title=title or fallback_title, text=text, html=content_html, source="readability-lxml")
     except Exception:
         return None
+
+
+def _extract_with_scrapling(html_text: str, *, url: str, fallback_title: str) -> ReadableDocument | None:
+    try:
+        from scrapling.parser import Selector
+    except Exception:
+        return None
+    try:
+        selector = Selector(html_text or "", url=url or "")
+        title = _scrapling_title(selector) or fallback_title
+        text = _scrapling_main_text(selector)
+        if not text:
+            return None
+        return ReadableDocument(title=title, text=_normalize_text(text), html=str(selector.html_content or ""), source="scrapling")
+    except Exception:
+        return None
+
+
+def _scrapling_title(selector: Any) -> str:
+    for query in ["meta[property='og:title']::attr(content)", "meta[name='twitter:title']::attr(content)", "title::text", "h1::text"]:
+        try:
+            value = _clean_text(selector.css(query).get() or "")
+        except Exception:
+            value = ""
+        if value:
+            return value[:180]
+    return ""
+
+
+def _scrapling_main_text(selector: Any) -> str:
+    candidate_queries = [
+        "#transcript-panel-full",
+        "article",
+        "main",
+        "[role='main']",
+        "div.article-body",
+        "div.article-content",
+        "div.entry-content",
+        "div.post-content",
+        "section.article-body",
+        "div.transcript-body",
+        "div[itemprop='articleBody']",
+        "body",
+    ]
+    best_text = ""
+    for query in candidate_queries:
+        try:
+            for node in selector.css(query):
+                text = _clean_scrapling_text(node.get_all_text())
+                if len(text) > len(best_text):
+                    best_text = text
+        except Exception:
+            continue
+    return best_text
+
+
+def _clean_scrapling_text(value: str) -> str:
+    lines = [_clean_text(line) for line in re.split(r"[\r\n]+", value or "")]
+    noise_tokens = {
+        "advertisement",
+        "subscribe",
+        "sign in",
+        "log in",
+        "share",
+        "cookie",
+    }
+    cleaned = [line for line in lines if line and line.casefold() not in noise_tokens]
+    return "\n".join(cleaned)
 
 
 def _extract_with_bs4(html_text: str, *, fallback_title: str) -> ReadableDocument:
